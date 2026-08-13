@@ -93,18 +93,42 @@ journalctl -u daily-digest.service -n 50   # ログ確認
 配信する前に静的 HTML を生成する。未設定なら生成しない（Discord だけ動く）。
 
 ```
-DIGEST_BASE_URL=https://portal.example.com/daily
-DIGEST_OUTPUT_DIR=/var/www/portal/daily
+DIGEST_BASE_URL=https://自分のドメイン/daily
+DIGEST_OUTPUT_DIR=/var/www/portal/public/daily
 ```
 
 `DIGEST_BASE_URL` は Discord のメッセージに載るリンクに使う。
 `DIGEST_OUTPUT_DIR` へ実際のファイルが出る。両方が同じ場所を指すようにする。
 
+**出力先は nginx が配っているディレクトリ（`root`）の配下でなければならない。**
+配下でないと、生成はできてもブラウザからは 404 になる。root の場所を確認する:
+
+```bash
+sudo nginx -T 2>/dev/null | grep "root "
+```
+
 出力先は `pi` ユーザーが書ける必要がある。
 
 ```bash
-sudo mkdir -p /var/www/portal/daily
-sudo chown pi:pi /var/www/portal/daily
+sudo mkdir -p /var/www/portal/public/daily
+sudo chown pi:pi /var/www/portal/public/daily
+```
+
+### ディレクトリを開いても 404 になる場合
+
+PHP アプリが同居していると、`location /` の `try_files` が
+ディレクトリへのアクセスを PHP のフロントコントローラに回してしまうことがある。
+その場合は nginx の server ブロックに、静的配信を優先する location を足す。
+
+```nginx
+location /daily/ {
+    try_files $uri $uri/ =404;
+    index index.html;
+}
+```
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
 ```
 
 digest.json だけから作り直せるので、表示を直したいときは収集し直さなくてよい。
