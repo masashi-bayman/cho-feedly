@@ -44,10 +44,16 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
+REPO_ROOT = Path(__file__).resolve().parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from envfile import load_dotenv  # noqa: E402
+
 LOG = logging.getLogger("render_html")
 
-REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_DIGEST_PATH = REPO_ROOT / "data" / "digest.json"
+DEFAULT_ENV_PATH = REPO_ROOT / ".env"
 
 DATE_DIR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -544,7 +550,8 @@ def resolve_output_dir(explicit: str | None) -> Path | None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="digest.json から静的 HTML を生成します")
     parser.add_argument("digest", nargs="?", default=str(DEFAULT_DIGEST_PATH), help="digest.json のパス")
-    parser.add_argument("--output", help="出力先（既定: 環境変数 DIGEST_OUTPUT_DIR）")
+    parser.add_argument("--output", help="出力先（既定: .env か環境変数の DIGEST_OUTPUT_DIR）")
+    parser.add_argument("--env", default=str(DEFAULT_ENV_PATH), help=".env のパス")
     parser.add_argument("--dry-run", action="store_true", help="書き込まず、書く予定の一覧だけ出す")
     parser.add_argument("-v", "--verbose", action="store_true", help="debug ログまで出す")
     args = parser.parse_args(argv)
@@ -555,9 +562,15 @@ def main(argv: list[str] | None = None) -> int:
         stream=sys.stderr,
     )
 
+    # --output があれば .env は要らないが、無い場合はここから DIGEST_OUTPUT_DIR を得る
+    if not args.output:
+        load_dotenv(args.env)
+
     output_dir = resolve_output_dir(args.output)
     if output_dir is None:
-        LOG.error("出力先が決まりません。--output を指定するか DIGEST_OUTPUT_DIR を設定してください")
+        LOG.error("出力先が決まりません。次のどちらかをしてください:")
+        LOG.error("  1) --output で直接指定する   例: --output ~/digest-site")
+        LOG.error("  2) %s に DIGEST_OUTPUT_DIR=... を書く", args.env)
         return 2
 
     try:
