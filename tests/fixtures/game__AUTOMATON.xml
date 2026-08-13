@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  検証する分岐:
+    - Atom 形式。published が無く updated しか無い
+    - タイトルに残った HTML エンティティ (&amp;) を戻せるか
+    - 2 件目は 3 日前なので落ちるはず
+-->
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>AUTOMATON</title>
+  <link href="https://automaton-media.com/"/>
+  <updated>2026-08-13T00:00:00Z</updated>
+  <entry>
+    <title>アクションRPG「Sword &amp;amp; Shield」国内配信日が決定</title>
+    <link href="https://automaton-media.com/articles/newsjp/20260812-001/"/>
+    <updated>2026-08-12T12:30:00Z</updated>
+  </entry>
+  <entry>
+    <title>3 日前の記事（24 時間より前なので落ちるはず）</title>
+    <link href="https://automaton-media.com/articles/newsjp/20260810-002/"/>
+    <updated>2026-08-10T00:00:00Z</updated>
+  </entry>
+</feed>

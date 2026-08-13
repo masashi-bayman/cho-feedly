@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  検証する分岐:
+    - 1 件目は NHK 主要と同じ記事。ただしリンクは Google News の中継 URL なので
+      URL では一致しない。strip_title_suffix による見出し一致で落ちるはず。
+      feeds.yaml で NHK を先に宣言しているので、残るのは NHK 側の直リンク。
+    - 2 件目のリンクに付いた utm_* が出力から除去されるか
+-->
+<rss version="2.0">
+  <channel>
+    <title>Google ニュース</title>
+    <link>https://news.google.com/</link>
+    <description>Google ニュース</description>
+    <item>
+      <title>政府、半導体分野への追加投資を決定 - NHKニュース</title>
+      <link>https://news.google.com/rss/articles/CBMiK2h0dHBzOi8vd3d3My5uaGsub3IuanA?oc=5</link>
+      <pubDate>Thu, 13 Aug 2026 05:20:00 +0900</pubDate>
+    </item>
+    <item>
+      <title>日銀、金融政策の現状維持を発表 - 日本経済新聞</title>
+      <link>https://news.example.com/economy/003.html?utm_source=news.google.com&amp;utm_medium=rss</link>
+      <pubDate>Wed, 12 Aug 2026 23:05:00 +0900</pubDate>
+    </item>
+  </channel>
+</rss>

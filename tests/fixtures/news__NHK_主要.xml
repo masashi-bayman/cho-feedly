@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  検証する分岐:
+    - RFC822 形式・タイムゾーン付き (+0900) の日時
+    - 相対 URL (2 件目) を channel の link で絶対化できるか
+    - 24 時間より前の記事 (3 件目) を落とせるか
+-->
+<rss version="2.0">
+  <channel>
+    <title>NHK NEWS WEB 主要ニュース</title>
+    <link>https://www3.nhk.or.jp/news/</link>
+    <description>NHK NEWS WEB の主要ニュース</description>
+    <item>
+      <title>政府、半導体分野への追加投資を決定</title>
+      <link>https://www3.nhk.or.jp/news/html/20260813/k0001.html</link>
+      <pubDate>Thu, 13 Aug 2026 05:12:00 +0900</pubDate>
+    </item>
+    <item>
+      <title>関西エリア、来週前半にかけて猛暑続く見込み</title>
+      <link>/news/html/20260813/k0002.html</link>
+      <pubDate>Thu, 13 Aug 2026 04:40:00 +0900</pubDate>
+    </item>
+    <item>
+      <title>一昨日の記事（24 時間より前なので落ちるはず）</title>
+      <link>https://www3.nhk.or.jp/news/html/20260811/k0003.html</link>
+      <pubDate>Tue, 11 Aug 2026 09:00:00 +0900</pubDate>
+    </item>
+  </channel>
+</rss>

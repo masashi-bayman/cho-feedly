@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  検証する分岐:
+    - タイムゾーンを持たない日時。feeds.yaml でこのフィードは assume_timezone: UTC
+      なので 2026-08-12T20:15:00 は JST の 08-13 05:15 とみなされ、窓に入るはず
+    - 2 件目は日時欄そのものが無い。取得時刻で窓は通り、published_at は null になり、
+      セクションの末尾に並ぶはず
+-->
+<rss version="2.0">
+  <channel>
+    <title>Hacker News: Front Page</title>
+    <link>https://news.ycombinator.com/</link>
+    <description>Hacker News RSS</description>
+    <item>
+      <title>&quot;Attention&quot; is all you need, again</title>
+      <link>https://example.dev/blog/attention-again</link>
+      <pubDate>2026-08-12T20:15:00</pubDate>
+    </item>
+    <item>
+      <title>Show HN: On-device inference on a Raspberry Pi 4B</title>
+      <link>https://example.dev/blog/on-device-inference</link>
+    </item>
+  </channel>
+</rss>

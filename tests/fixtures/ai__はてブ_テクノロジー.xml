@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  検証する分岐:
+    - タイムゾーンを持たない日時。こちらは既定の assume_timezone: Asia/Tokyo が効く
+    - 2 件目が「JST とみなすか UTC とみなすかで結果が変わる」境界のケース。
+      JST 解釈なら 08-11 23:00 JST で窓の外（落ちる）。
+      UTC 解釈なら 08-12 08:00 JST になり窓の中に入ってしまう。
+      この 1 件が落ちていれば assume_timezone が効いている証拠になる。
+    - 1 件目のリンクに付いた utm_source が出力から除去されるか
+-->
+<rss version="2.0">
+  <channel>
+    <title>はてなブックマーク - 人気エントリー - テクノロジー</title>
+    <link>https://b.hatena.ne.jp/hotentry/it</link>
+    <description>テクノロジーの人気エントリー</description>
+    <item>
+      <title>オンデバイス推論の最適化に関する技術記事</title>
+      <link>https://example.dev/blog/optimize-inference?utm_source=hatena&amp;id=42</link>
+      <pubDate>2026-08-12T18:00:00</pubDate>
+    </item>
+    <item>
+      <title>境界のケース（JST 解釈なら窓の外、UTC 解釈なら窓の中）</title>
+      <link>https://example.dev/blog/older</link>
+      <pubDate>2026-08-11T23:00:00</pubDate>
+    </item>
+  </channel>
+</rss>

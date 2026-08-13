@@ -1,0 +1,83 @@
+# 購読する RSS の一覧。
+#
+# このファイルの編集だけでフィードを増減できること。コード変更を伴わせないこと。
+#
+# ─────────────────────────────────────────────────────────────────────────
+# ⚠ 以下の URL はすべて「未検証の候補」です。
+#
+#   これらを書いた環境は外向き通信が GitHub 以外ブロックされており、疎通確認が
+#   できませんでした。Raspberry Pi 上で次を実行し、結果を見て確定してください。
+#
+#       python3 -m collectors.feeds --check
+#
+#   各フィードの HTTP ステータス / パース可否 / 24 時間以内の件数 / 日時欄の
+#   有無とタイムゾーンの有無が表で出ます。失敗が 1 つでもあれば終了コードは 1 です。
+#   同時に取得内容を tests/fixtures/ へ保存しておくと、以後ネットワークなしで
+#   収集ロジックを検証できます。
+#
+#       python3 -m collectors.feeds --check --save-fixtures tests/fixtures
+# ─────────────────────────────────────────────────────────────────────────
+
+defaults:
+  window_hours: 24                 # generated_at から遡る時間。これより古い記事は捨てる
+  timeout: 15                      # 1 フィードあたりの取得タイムアウト(秒)
+  per_feed_limit: 10               # 1 フィードから採用する最大件数
+  host_delay: 1.0                  # 同一ホストへの連続アクセスの最小間隔(秒)
+  assume_timezone: Asia/Tokyo      # タイムゾーンを持たない日時をどう解釈するか
+  user_agent: "daily-digest/0.1 (+RSS reader for personal use)"
+
+# セクションの並びがそのまま digest.json の並びになる。
+# id / title / emoji は digest.json のセクションと同じ意味・同じ名前。
+# type は links 固定なので書かない（feeds.py が付ける）。
+#
+# フィードの並びは「優先度」でもある。異なる媒体が同じ記事を配信した場合、
+# 先に宣言したフィード側を残す。一次情報を上に置くこと。
+#
+# 各フィードで指定できる任意キー:
+#   limit               defaults.per_feed_limit の上書き
+#   enabled             false で一時的に無効化（行を消さずに外せる）
+#   timeout             defaults.timeout の上書き
+#   assume_timezone     defaults.assume_timezone の上書き
+#   strip_title_suffix  重複判定の際、タイトル末尾の " - 媒体名" を無視する
+sections:
+  - id: news
+    title: 時事ニュース
+    emoji: "📰"
+    feeds:
+      # 一次情報を先に置く。Google News が同じ記事を配信した場合こちらが残る
+      - name: NHK 主要
+        url: https://www.nhk.or.jp/rss/news/cat0.xml
+      - name: Google News
+        url: "https://news.google.com/rss?hl=ja&gl=JP&ceid=JP:ja"
+        limit: 5
+        # Google News のタイトルは "記事見出し - 媒体名" の形。
+        # 媒体名を落とさないと一次情報側と同じ記事だと判定できない
+        strip_title_suffix: true
+
+  - id: game
+    title: ゲーム
+    emoji: "🎮"
+    feeds:
+      - name: 4Gamer
+        url: https://www.4gamer.net/rss/index.xml
+      - name: AUTOMATON
+        url: https://automaton-media.com/feed/
+      - name: Game*Spark
+        url: https://www.gamespark.jp/rss20/index.rdf
+
+  - id: ai
+    title: AI
+    emoji: "🤖"
+    feeds:
+      # arXiv の日次リストは 1 日 100 件規模になる。必ず絞る
+      - name: arXiv cs.AI
+        url: https://export.arxiv.org/rss/cs.AI
+        limit: 5
+        assume_timezone: UTC
+      # news.ycombinator.com/rss は pubDate を持たない。日時が付く hnrss を使う
+      - name: Hacker News
+        url: https://hnrss.org/frontpage
+        limit: 5
+        assume_timezone: UTC
+      - name: はてブ テクノロジー
+        url: https://b.hatena.ne.jp/hotentry/it.rss
