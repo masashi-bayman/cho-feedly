@@ -31,6 +31,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone, tzinfo
 from email.utils import parsedate_to_datetime
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
@@ -649,6 +650,178 @@ def skeleton_sections(config: Config) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# --probe : サイトの URL から RSS の在り処を探す
+# ---------------------------------------------------------------------------
+# RSS の場所を明示していないサイト向けに、当てずっぽうで叩く候補。
+# 1 ホストにつき host_delay 秒空けて順に試すので、多く並べると時間がかかる
+FALLBACK_FEED_PATHS = ("/feed/", "/rss", "/index.xml", "/rss.xml", "/atom.xml")
+
+
+class FeedLinkParser(HTMLParser):
+    """HTML の <head> から RSS/Atom への <link rel="alternate"> を拾う。
+
+    BeautifulSoup を使わないのは、Pi に依存を増やしたくないため。
+    やることが「link タグの属性を見る」だけなので標準ライブラリで足りる。
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.candidates: list[tuple[str, str]] = []  # (href, title)
+        self.page_title = ""
+        self._in_title = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "title":
+            self._in_title = True
+            return
+        if tag != "link":
+            return
+        attributes = {k.lower(): (v or "") for k, v in attrs}
+        rel = attributes.get("rel", "").lower()
+        content_type = attributes.get("type", "").lower()
+        href = attributes.get("href", "").strip()
+        if not href or "alternate" not in rel:
+            return
+        if "rss" in content_type or "atom" in content_type:
+            self.candidates.append((href, attributes.get("title", "")))
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "title":
+            self._in_title = False
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title and not self.page_title:
+            self.page_title = data.strip()
+
+
+def _probe_feed_config(url: str) -> FeedConfig:
+    """--probe 用の使い捨て設定。"""
+    return FeedConfig(
+        name="probe",
+        url=url,
+        section_id="probe",
+        limit=10_000,
+        timeout=15,
+        assume_timezone="Asia/Tokyo",
+        strip_title_suffix=False,
+    )
+
+
+def probe(url: str, config: Config) -> int:
+    """サイトの URL を渡すと、RSS を探して feeds.yaml に貼る 2 行を出力する。"""
+    source = NetworkSource(config.user_agent, config.host_delay)
+
+    def inspect(candidate: str) -> tuple[bool, str, str]:
+        """(RSS か, 説明, フィード名) を返す。"""
+        try:
+            raw = source.fetch(_probe_feed_config(candidate))
+        except Exception as exc:
+            return False, f"取得できません ({type(exc).__name__})", ""
+        parsed = feedparser.parse(raw)
+        entries = parsed.get("entries") or []
+        if not entries:
+            return False, "RSS として読めません", ""
+        name = clean_title(str((parsed.get("feed") or {}).get("title") or "")) or urlsplit(candidate).netloc
+        dated = sum(1 for e in entries if entry_datetime(e, JST)[1] != "none")
+        return True, f"記事 {len(entries)} 件 / 日時あり {dated} 件", name
+
+    print(f"[probe] {url} を調べます", file=sys.stderr)
+
+    # 渡された URL 自体が RSS のことがある。まずそれを見る
+    is_feed, detail, name = inspect(url)
+    if is_feed:
+        print(f"  これ自体が RSS でした — {detail}", file=sys.stderr)
+        return _print_feed_snippet(name, url)
+
+    # HTML なら <link rel="alternate"> を読む
+    try:
+        html_source = source.fetch(_probe_feed_config(url)).decode("utf-8", errors="replace")
+    except Exception as exc:
+        print(f"[error] ページを取得できません: {exc}", file=sys.stderr)
+        return 1
+
+    parser = FeedLinkParser()
+    try:
+        parser.feed(html_source)
+    except Exception as exc:
+        LOG.debug("HTML の解析に失敗しました: %s", exc)
+
+    candidates: list[str] = []
+    for href, _ in parser.candidates:
+        absolute = urljoin(url, href)
+        if absolute not in candidates:
+            candidates.append(absolute)
+
+    if candidates:
+        print(f"  ページ内に {len(candidates)} 件の RSS 候補が書かれていました", file=sys.stderr)
+    else:
+        print("  ページに RSS の記載が無いので、よくある場所を順に試します", file=sys.stderr)
+        base = urlsplit(url)
+        for path in FALLBACK_FEED_PATHS:
+            candidates.append(urlunsplit((base.scheme, base.netloc, path, "", "")))
+
+    found: list[tuple[str, str]] = []  # (name, url)
+    for candidate in candidates[:6]:
+        ok, detail, name = inspect(candidate)
+        mark = "OK  " if ok else "NG  "
+        print(f"  {mark}{candidate}\n        {detail}", file=sys.stderr)
+        if ok:
+            found.append((name, candidate))
+
+    if not found:
+        print("\n[NG] RSS が見つかりませんでした。", file=sys.stderr)
+        print("     サイトのフッターや「RSS」「購読」のリンクを探して、", file=sys.stderr)
+        print("     その URL を直接 --probe に渡すと確実です。", file=sys.stderr)
+        return 1
+
+    print("", file=sys.stderr)
+    name, feed_url = found[0]
+    return _print_feed_snippet(name, feed_url, extras=found[1:])
+
+
+def _print_feed_snippet(name: str, url: str, extras: list[tuple[str, str]] | None = None) -> int:
+    """feeds.yaml にそのまま貼れる形で出す。"""
+    short = truncate_name(name)
+    print("以下を config/feeds.yaml の、入れたいセクションの feeds: の下に貼ってください。", file=sys.stderr)
+    print("name は表示名なので好きに変えて構いません。\n", file=sys.stderr)
+    print(f"      - name: {short}")
+    print(f"        url: {yaml_scalar(url)}")
+    if extras:
+        print("\n他にもこれらが使えます:", file=sys.stderr)
+        for other_name, other_url in extras:
+            print(f"      - name: {truncate_name(other_name)}", file=sys.stderr)
+            print(f"        url: {yaml_scalar(other_url)}", file=sys.stderr)
+    print("\n貼ったあと `python3 -m collectors.feeds --check` で確認してください。", file=sys.stderr)
+    return 0
+
+
+def truncate_name(name: str) -> str:
+    """フィードが名乗る名前は長いことがあるので、表示名として短くする。"""
+    cleaned = WHITESPACE_RE.sub(" ", name).strip()
+    # "GIGAZINE - 最新記事" のような装飾を落とす
+    cleaned = TITLE_SUFFIX_RE.sub("", cleaned).strip() or cleaned
+    return truncate(cleaned, 30)
+
+
+def truncate(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def yaml_scalar(value: str) -> str:
+    """YAML として安全に読める形にする。
+
+    引用が要るかを文字種から推測すると、URL のコロンに反応して全部引用してしまう。
+    実際に PyYAML へ食わせて元の文字列に戻るかどうかで判定する。
+    """
+    try:
+        if yaml.safe_load(f"k: {value}\n") == {"k": value}:
+            return value
+    except yaml.YAMLError:
+        pass
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+# ---------------------------------------------------------------------------
 # --check の表
 # ---------------------------------------------------------------------------
 def display_width(text: str) -> int:
@@ -741,6 +914,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="通信せず、YAML の検証とセクション骨格の確認だけ行う")
     parser.add_argument("--fixtures", metavar="DIR", help="保存済み XML から読み込む（通信しない）")
     parser.add_argument("--check", action="store_true", help="購読先の疎通を診断して表で出す")
+    parser.add_argument(
+        "--probe",
+        metavar="URL",
+        help="サイトの URL から RSS を探し、feeds.yaml に貼る 2 行を出力する",
+    )
     parser.add_argument("--save-fixtures", metavar="DIR", help="--check で取得した内容を fixture として保存する")
     parser.add_argument("--generated-at", metavar="ISO8601", help="24 時間窓の基準時刻（既定: 現在時刻）")
     parser.add_argument(
@@ -774,6 +952,10 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"[error] {exc}", file=sys.stderr)
         return 2
+
+    # --- サイトから RSS を探す
+    if args.probe:
+        return probe(args.probe, config)
 
     # --- 通信ゼロ。YAML が読めるか、セクションの形が想定どおりかだけ見る
     if args.dry_run:

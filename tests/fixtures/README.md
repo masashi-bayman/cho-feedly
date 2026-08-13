@@ -37,21 +37,23 @@ python3 -m collectors.feeds --check --save-fixtures tests/fixtures
 | ファイル | 通す分岐 |
 |---|---|
 | `news__NHK_主要.xml` | RFC822 の TZ 付き日時 / 相対 URL の絶対化 / 24 時間より前の記事の除外 |
-| `news__Google_News.xml` | 中継 URL のため URL では一致しない重複を、見出しの `- 媒体名` を落として検出 / `utm_*` の除去 |
 | `game__AUTOMATON.xml` | Atom で `published` が無く `updated` だけ / タイトルの HTML エンティティ |
 | `ai__Hacker_News.xml` | TZ なし日時を UTC とみなす / 日時欄そのものが無いエントリ |
-| `ai__はてブ_テクノロジー.xml` | TZ なし日時を JST とみなす / JST か UTC かで結果が変わる境界のケース |
+| `ai__はてブ_テクノロジー.xml` | TZ なし日時を JST とみなす / JST か UTC かで結果が変わる境界のケース / 別フィードと同じ記事を指す重複 |
+| `news__Google_News.xml` | 見出し末尾の `- 媒体名` を落とした重複検出。**現在 Google News は `enabled: false` なので読まれません**。復活させたときのために残しています |
 
 `4Gamer` / `Game*Spark` / `arXiv cs.AI` の fixture は**わざと置いていません**。
 一部のフィードが取れなくても他が返ることを、実行するたびに確認するためです。
 
 ## 期待される結果
 
-上のコマンドで、news 3 件 / game 1 件 / ai 3 件の計 7 件になります。確認どころ:
+上のコマンドで、news 2 件 / game 1 件 / ai 3 件の計 6 件になります。確認どころ:
 
 - NHK の 2 件目の URL が `https://www3.nhk.or.jp/news/html/20260813/k0002.html` に
   絶対化されている
-- 「政府、半導体分野への追加投資を決定」が **NHK 側の直リンク 1 件だけ**で、
-  Google News 側が消えている（`feeds.yaml` で NHK を先に宣言しているため）
+- ログに `重複として 1 件を除外しました` が出ている。はてブが Hacker News と
+  同じ記事を `?utm_source=hatena` 付きで持っているが、追跡パラメータを外した
+  うえで同一と判定され、先に宣言した Hacker News 側が残る
 - はてブの「境界のケース」が入っていない（`assume_timezone: Asia/Tokyo` が効いている）
 - `Show HN:` の `published_at` が `null` で、AI セクションの末尾にある
+- `4Gamer` などが `NO FIXTURE` で警告になるが、他のフィードの結果は返っている

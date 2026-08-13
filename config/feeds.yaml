@@ -50,11 +50,16 @@ sections:
       # このフィードは全体で 7 件程度しか無いので limit は効かない
       - name: NHK 主要
         url: https://www.nhk.or.jp/rss/news/cat0.xml
+      # 2026-08-13 に無効化。実運用で 2 つ問題が出たため:
+      #   1. 運んでくる記事がほぼ NHK と重複していた。しかも NHK 側が見出しを
+      #      更新すると（「18市」→「20自治体」）重複と判定できずに二重掲載される
+      #   2. リンクが news.google.com の中継 URL で、開くと 1 回余計な通信が入る。
+      #      電車内のオフライン閲覧という用途と相性が悪い
+      # 一次情報を直接引く方針にする。復活させるなら enabled を外すだけ
       - name: Google News
         url: "https://news.google.com/rss?hl=ja&gl=JP&ceid=JP:ja"
+        enabled: false
         limit: 5
-        # Google News のタイトルは "記事見出し - 媒体名" の形。
-        # 媒体名を落とさないと一次情報側と同じ記事だと判定できない
         strip_title_suffix: true
 
   - id: game
@@ -72,16 +77,23 @@ sections:
     title: AI
     emoji: "🤖"
     feeds:
-      # arXiv の日次リストは実測 306 件。必ず絞る。
-      # ただし絞り方はフィードの並び順の先頭 5 件で、注目度順ではない
-      - name: arXiv cs.AI
-        url: https://export.arxiv.org/rss/cs.AI
-        limit: 5
-        assume_timezone: UTC
-      # news.ycombinator.com/rss は pubDate を持たない。日時が付く hnrss を使う
+      # news.ycombinator.com/rss は pubDate を持たない。日時が付く hnrss を使う。
+      # frontpage をそのまま入れると AI と無関係な技術ニュースが大半を占めたため、
+      # 2026-08-13 に検索クエリ付きへ変更した。
+      # --check で 24h内 が 0 件に近ければ points を下げるか消すこと
       - name: Hacker News
-        url: https://hnrss.org/frontpage
+        url: "https://hnrss.org/newest?q=AI&points=50"
         limit: 5
         assume_timezone: UTC
       - name: はてブ テクノロジー
         url: https://b.hatena.ne.jp/hotentry/it.rss
+
+      # 2026-08-13 に無効化。1 日 306 件のうち先頭 5 件を取るだけで、
+      # その 5 件は注目度順でも関連度順でもない実質ランダムだった。
+      # さらに投稿時刻が古いため、時刻順に並べると Discord の上位 6 件に一度も
+      # 顔を出せていなかった。絞り込みの当てが付いたら復活させる
+      - name: arXiv cs.AI
+        url: https://export.arxiv.org/rss/cs.AI
+        enabled: false
+        limit: 5
+        assume_timezone: UTC
