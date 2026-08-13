@@ -87,6 +87,45 @@ journalctl -u daily-digest.service -n 50   # ログ確認
 いずれも `.gitignore` 済みなので `git pull` の邪魔にはならない。
 書き込みは一時ファイル経由なので、途中で落ちても壊れた JSON は残らない。
 
+## PWA サイト
+
+`.env` の `DIGEST_OUTPUT_DIR` を設定すると、`run_daily.py` が Discord へ
+配信する前に静的 HTML を生成する。未設定なら生成しない（Discord だけ動く）。
+
+```
+DIGEST_BASE_URL=https://portal.example.com/daily
+DIGEST_OUTPUT_DIR=/var/www/portal/daily
+```
+
+`DIGEST_BASE_URL` は Discord のメッセージに載るリンクに使う。
+`DIGEST_OUTPUT_DIR` へ実際のファイルが出る。両方が同じ場所を指すようにする。
+
+出力先は `pi` ユーザーが書ける必要がある。
+
+```bash
+sudo mkdir -p /var/www/portal/daily
+sudo chown pi:pi /var/www/portal/daily
+```
+
+digest.json だけから作り直せるので、表示を直したいときは収集し直さなくてよい。
+
+```bash
+.venv/bin/python render_html.py                  # data/digest.json から再生成
+.venv/bin/python render_html.py --dry-run        # 書かずに、書く予定を確認
+.venv/bin/python render_html.py data/archive/2026-08-13.json   # 過去分から
+```
+
+### Service Worker について
+
+**HTTPS でのみ動作する。** Cloudflare Tunnel 経由の公開 URL では動くが、
+Pi のローカル IP に `http://` で直接アクセスした場合は登録されず、
+オフライン閲覧もできない。動作確認は必ず公開 URL 側で行うこと。
+
+一度開いたページはキャッシュに積まれ、以後は圏外でも読める。キャッシュ名は
+日付で変えていないので、過去に開いた日のページも消えずに残る。
+
+まだ開いたことがないページを圏外で開くと、その旨の案内が出る。
+
 ## タイムゾーン
 
 `OnCalendar` はシステムのタイムゾーンに従う。JST になっているか確認する。

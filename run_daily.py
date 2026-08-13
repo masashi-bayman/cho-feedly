@@ -11,10 +11,12 @@
     1. .env を読む
     2. collectors/ で収集する
     3. data/digest.json と data/archive/YYYY-MM-DD.json に書く
-    4. publishers/discord.py で配信する
+    4. render_html.py で PWA サイトを生成する（DIGEST_OUTPUT_DIR がある場合）
+    5. publishers/discord.py で配信する
 
-3 を 4 より先に置いているのは、Discord への配信が失敗しても PWA 側
-（Task 4 の render_html.py）が当日分を出せるようにするため。
+4 を 5 より先に置いているのは、Discord のメッセージに載る digest_url を
+タップした先が、届いた時点で既に存在しているようにするため。
+3 を先に置いているのは、配信が失敗しても PWA 側が当日分を出せるようにするため。
 
 終了コード:
     0  配信できた（一部の情報源が落ちていても、取れた分を配信できれば 0）
@@ -47,6 +49,7 @@ REPO_ROOT = Path(__file__).resolve().parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import render_html  # noqa: E402
 from collectors import feeds, market  # noqa: E402
 from publishers import discord as discord_publisher  # noqa: E402
 
@@ -195,6 +198,21 @@ def summarize(digest: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 # 出力
 # ---------------------------------------------------------------------------
+def render_site(digest: dict[str, Any], dry_run: bool) -> bool:
+    """PWA サイトを生成する。失敗しても Discord への配信は続ける。"""
+    output_dir = render_html.resolve_output_dir(None)
+    if output_dir is None:
+        LOG.info("DIGEST_OUTPUT_DIR が未設定のため、PWA サイトは生成しません")
+        return False
+    try:
+        page = render_html.render_site(digest, output_dir, dry_run=dry_run)
+    except Exception:
+        LOG.exception("PWA サイトの生成に失敗しました。Discord への配信は続けます")
+        return False
+    LOG.info("PWA サイトを生成しました: %s", page)
+    return True
+
+
 def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
     """途中で落ちても壊れたファイルを残さないよう、書いてから差し替える。
 
@@ -264,6 +282,11 @@ def main(argv: list[str] | None = None) -> int:
         archive_path = ARCHIVE_DIR / f"{generated_at:%Y-%m-%d}.json"
         write_json_atomic(archive_path, digest)
         LOG.info("%s と %s に書き出しました", DIGEST_PATH, archive_path)
+
+    # PWA サイトの生成。Discord のメッセージに載る digest_url をタップした先が、
+    # 届いた時点で既に存在しているよう配信より前に行う。
+    # ここが失敗しても Discord への配信は続ける（片方だけでも届いた方がよい）
+    render_site(digest, dry_run=args.dry_run)
 
     options = discord_publisher.Options(max_items=args.max_items, dry_run=args.dry_run)
     payload = discord_publisher.build_payload(digest, options)
