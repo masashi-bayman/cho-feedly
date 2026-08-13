@@ -1,0 +1,25 @@
+{
+  "_comment": "通常のケース。日足が 4 本そろっている。末尾 2 本から前日比を計算する",
+  "chart": {
+    "result": [
+      {
+        "meta": {
+          "currency": "JPY",
+          "symbol": "^N225",
+          "regularMarketPrice": 38120.55,
+          "chartPreviousClose": 37200.0,
+          "previousClose": 37653.2
+        },
+        "timestamp": [1786230600, 1786317000, 1786403400, 1786489800],
+        "indicators": {
+          "quote": [
+            {
+              "close": [37200.0, 37450.1, 37653.2, 38120.55]
+            }
+          ]
+        }
+      }
+    ],
+    "error": null
+  }
+}

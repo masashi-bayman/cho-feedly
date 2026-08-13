@@ -1,0 +1,25 @@
+{
+  "_comment": "長期休場などで日足が 1 本も確定していないケース。close が全て null になる。meta の regularMarketPrice と chartPreviousClose で補う",
+  "chart": {
+    "result": [
+      {
+        "meta": {
+          "currency": "JPY",
+          "symbol": "USDJPY=X",
+          "regularMarketPrice": 148.62,
+          "chartPreviousClose": 148.01,
+          "previousClose": 148.01
+        },
+        "timestamp": [1786230600, 1786317000],
+        "indicators": {
+          "quote": [
+            {
+              "close": [null, null]
+            }
+          ]
+        }
+      }
+    ],
+    "error": null
+  }
+}

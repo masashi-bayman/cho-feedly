@@ -1,4 +1,9 @@
 feedparser>=6.0.11
 requests>=2.32.0
 PyYAML>=6.0.2
-yfinance>=0.2.40
+
+# yfinance は使わない。
+# 必要なのは 1 日 1 回・数銘柄の終値と前日比だけで、yfinance が引き込む
+# pandas / numpy は Raspberry Pi には重い。Python 3.14 向けの ARM 用パッケージが
+# 揃っていない問題もある。collectors/market.py は Yahoo Finance の公開 JSON を
+# requests で直接読んでいるため、追加の依存は不要。

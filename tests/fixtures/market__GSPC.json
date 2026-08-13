@@ -1,0 +1,25 @@
+{
+  "_comment": "休場日が混ざったケース。close に null が入る。null を除いた末尾 2 本で計算する",
+  "chart": {
+    "result": [
+      {
+        "meta": {
+          "currency": "USD",
+          "symbol": "^GSPC",
+          "regularMarketPrice": 5620.31,
+          "chartPreviousClose": 5700.0,
+          "previousClose": 5640.0
+        },
+        "timestamp": [1786230600, 1786317000, 1786403400, 1786489800],
+        "indicators": {
+          "quote": [
+            {
+              "close": [5700.0, null, 5640.0, 5620.31]
+            }
+          ]
+        }
+      }
+    ],
+    "error": null
+  }
+}

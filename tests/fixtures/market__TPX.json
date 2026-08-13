@@ -1,0 +1,10 @@
+{
+  "_comment": "記号が存在しないケース。Yahoo はこの形でエラーを返す。この 1 銘柄だけ落として他は返ること",
+  "chart": {
+    "result": null,
+    "error": {
+      "code": "Not Found",
+      "description": "No data found, symbol may be delisted"
+    }
+  }
+}

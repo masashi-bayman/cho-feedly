@@ -1,0 +1,49 @@
+# 監視する銘柄・指数の一覧。
+#
+# このファイルの編集だけで増減できること。コード変更を伴わせないこと。
+#
+# ─────────────────────────────────────────────────────────────────────────
+# ⚠ TOPIX の銘柄記号は未検証です。
+#
+#   Yahoo Finance における TOPIX の記号は表記揺れがあり、確証が持てませんでした。
+#   Raspberry Pi 上で次を実行し、TOPIX の行が OK になるか確認してください。
+#
+#       python3 -m collectors.market --check
+#
+#   NG だった場合、下の candidates コメントに挙げた記号を順に試してください。
+#   1 銘柄が NG でも他の銘柄は普通に取得されます。
+# ─────────────────────────────────────────────────────────────────────────
+
+defaults:
+  timeout: 15
+  host_delay: 1.0        # 同一ホストへの連続アクセスの最小間隔(秒)
+  range: 5d              # 取得する日足の期間。前日比の計算に最低 2 営業日分が要る
+  decimals: 2            # 表示の小数点以下桁数
+  user_agent: "daily-digest/0.1 (+market watch for personal use)"
+
+# digest.json のセクションヘッダになる。feeds.yaml のセクションと同じ意味
+section:
+  id: market
+  title: マーケット
+  emoji: "📈"
+
+# 並びがそのまま Discord での並びになる。
+# 各銘柄で指定できる任意キー: decimals / enabled / range
+symbols:
+  - name: 日経平均
+    symbol: "^N225"
+
+  # 未検証。NG だったら以下を順に試すこと:
+  #   "^TOPX"  /  "998405.T"  /  "1306.T"（TOPIX 連動 ETF。指数そのものではない）
+  - name: TOPIX
+    symbol: "^TPX"
+
+  - name: S&P500
+    symbol: "^GSPC"
+
+  - name: USD/JPY
+    symbol: "USDJPY=X"
+
+# 投資信託は監視銘柄が未確定のため保留（HANDOFF の Task 2 参照）。
+# 銘柄が決まったら、運用会社が公開している基準価額 CSV を取得する実装を足す。
+# その際 CSV が Shift_JIS のことがあるのでエンコーディングに注意。

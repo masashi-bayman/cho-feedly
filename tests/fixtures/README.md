@@ -1,33 +1,41 @@
 # fixtures
 
-`collectors/feeds.py --fixtures` が読む、保存済みの RSS/Atom です。
+収集モジュールが `--fixtures` で読む、保存済みの応答です。
 **ネットワークなしで収集ロジックを通しで動かす**ためのものです。
 
 ```bash
+# RSS 側
 python3 -m collectors.feeds --fixtures tests/fixtures \
   --generated-at 2026-08-13T06:00:00+09:00
+
+# マーケット側
+python3 -m collectors.market --fixtures tests/fixtures
 ```
 
-`--generated-at` は必ず付けてください。24 時間フィルタの基準がこれです。
+RSS 側では `--generated-at` を必ず付けてください。24 時間フィルタの基準がこれです。
 省略すると現在時刻が基準になり、収録した記事が全部「古い」と判定されて空になります。
+マーケット側は日付に依存しないので不要です。
 
 ## ファイル名の決まり
 
-`{セクション id}__{フィード name}.xml`。`feeds.yaml` の値から機械的に決まります
-（ファイル名に使えない文字は `_` になります）。フィードの `name` を変えたら
-ファイル名も変えてください。対応するファイルが無いフィードは `NO FIXTURE` として
-読み飛ばされます（落ちません）。
+- RSS: `{セクション id}__{フィード name}.xml` — `feeds.yaml` の値から決まる
+- マーケット: `market__{銘柄記号}.json` — `market.yaml` の値から決まる
+
+いずれもファイル名に使えない文字は `_` になります（`^N225` → `market__N225.json`）。
+`name` や `symbol` を変えたらファイル名も変えてください。対応するファイルが無い
+場合は `NO FIXTURE` として読み飛ばされます（落ちません）。
 
 ## 現物の取り込み
 
-Raspberry Pi 上で実際のフィードを取ってきて、そのまま fixture にできます。
+Raspberry Pi 上で実際の応答を取ってきて、そのまま fixture にできます。
 
 ```bash
-python3 -m collectors.feeds --check --save-fixtures tests/fixtures
+python3 -m collectors.feeds  --check --save-fixtures tests/fixtures
+python3 -m collectors.market --check --save-fixtures tests/fixtures
 ```
 
-購読先を変えたとき、あるいは「本番では動いていないのに fixture では通る」という
-状況になったときは、これで現物に入れ替えてください。
+購読先や銘柄を変えたとき、あるいは「本番では動いていないのに fixture では通る」
+という状況になったときは、これで現物に入れ替えてください。
 
 ## いま収録しているもの
 
@@ -57,3 +65,19 @@ python3 -m collectors.feeds --check --save-fixtures tests/fixtures
 - はてブの「境界のケース」が入っていない（`assume_timezone: Asia/Tokyo` が効いている）
 - `Show HN:` の `published_at` が `null` で、AI セクションの末尾にある
 - `4Gamer` などが `NO FIXTURE` で警告になるが、他のフィードの結果は返っている
+
+## マーケット側
+
+| ファイル | 通す分岐 |
+|---|---|
+| `market__N225.json` | 日足がそろった通常のケース |
+| `market__GSPC.json` | 休場日の `null` が混ざったケース。`null` を除いた末尾 2 本で前日比を計算する |
+| `market__USDJPY_X.json` | 日足が 1 本も確定していないケース。`meta` の値で補う |
+| `market__TPX.json` | 記号が存在しないケース。この 1 銘柄だけ落として他は返る |
+
+`python3 -m collectors.market --fixtures tests/fixtures` で 4 銘柄中 3 件になります。
+値は `data/sample_digest.json` と一致するように作ってあるので、
+桁区切りと符号の付き方をそのまま見比べられます。
+
+TOPIX が落ちるのは**意図した結果**です。1 銘柄が取れなくても他が返ることを、
+実行するたびに確認するためのケースです。
