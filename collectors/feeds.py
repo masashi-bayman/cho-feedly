@@ -385,6 +385,9 @@ class FeedResult:
     status: str
     items: list[dict[str, Any]] = field(default_factory=list)
     total_entries: int = 0
+    # limit で切る前の、24 時間の窓に入っていた件数。
+    # items は limit 適用後なので、両方持っていないと limit の妥当性が判断できない
+    in_window: int = 0
     date_origins: dict[str, int] = field(default_factory=lambda: {"tz": 0, "naive": 0, "none": 0})
     raw: bytes | None = None
     note: str = ""
@@ -516,15 +519,20 @@ def collect_feed(
             continue
 
     # limit はフィード側の並び（＝多くのフィードで新しい順）の先頭から数える
+    result.in_window = len(result.items)
     if len(result.items) > feed.limit:
         result.items = result.items[: feed.limit]
 
     LOG.info(
-        "[%s] %s: %d 件中 %d 件を採用",
+        "[%s] %s: 取得 %d 件 → 24h内 %d 件 → 採用 %d 件%s",
         feed.section_id,
         feed.name,
         result.total_entries,
+        result.in_window,
         len(result.items),
+        f" (limit={feed.limit} で {result.in_window - len(result.items)} 件切り捨て)"
+        if result.in_window > len(result.items)
+        else "",
     )
     return result
 
@@ -652,7 +660,19 @@ def pad(text: str, width: int) -> str:
 
 
 def print_check_table(results: list[FeedResult], window_hours: float) -> None:
-    headers = ["セクション", "フィード", "状態", "取得", f"{int(window_hours)}h内", "TZ有", "TZ無", "日時欠", "備考"]
+    headers = [
+        "セクション",
+        "フィード",
+        "状態",
+        "取得",
+        f"{int(window_hours)}h内",
+        "採用",
+        "limit",
+        "TZ有",
+        "TZ無",
+        "日時欠",
+        "備考",
+    ]
     rows: list[list[str]] = []
     for r in results:
         rows.append(
@@ -661,7 +681,9 @@ def print_check_table(results: list[FeedResult], window_hours: float) -> None:
                 r.feed.name,
                 r.status,
                 str(r.total_entries) if r.ok else "-",
+                str(r.in_window) if r.ok else "-",
                 str(len(r.items)) if r.ok else "-",
+                str(r.feed.limit),
                 str(r.date_origins["tz"]) if r.ok else "-",
                 str(r.date_origins["naive"]) if r.ok else "-",
                 str(r.date_origins["none"]) if r.ok else "-",
@@ -679,8 +701,16 @@ def print_check_table(results: list[FeedResult], window_hours: float) -> None:
     failed = [r for r in results if not r.ok]
     naive = [r for r in results if r.ok and r.date_origins["naive"]]
     undated = [r for r in results if r.ok and r.date_origins["none"]]
+    truncated = [r for r in results if r.ok and r.in_window > len(r.items)]
 
     print("", file=sys.stderr)
+    if truncated:
+        print("[注意] limit で切り捨てが発生しています。増やすかどうかは好みで判断してください:", file=sys.stderr)
+        for r in truncated:
+            print(
+                f"        {r.feed.name}: 24h内 {r.in_window} 件 → limit {r.feed.limit} 件",
+                file=sys.stderr,
+            )
     if naive:
         print(
             "[注意] タイムゾーンを持たない日時を返すフィードがあります: "
@@ -713,6 +743,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check", action="store_true", help="購読先の疎通を診断して表で出す")
     parser.add_argument("--save-fixtures", metavar="DIR", help="--check で取得した内容を fixture として保存する")
     parser.add_argument("--generated-at", metavar="ISO8601", help="24 時間窓の基準時刻（既定: 現在時刻）")
+    parser.add_argument(
+        "--digest",
+        action="store_true",
+        help="セクション配列ではなく digest.json 相当の完全な形で出力する"
+        "（publishers/discord.py --dry-run に渡して確認するための補助。run_daily.py はこれを使わない）",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="debug ログまで出す")
     args = parser.parse_args(argv)
 
@@ -774,7 +810,17 @@ def main(argv: list[str] | None = None) -> int:
 
     # --- 通常の収集（--fixtures 指定時はローカル XML から）
     sections = collect_with_config(config, generated_at=generated_at, fixtures_dir=args.fixtures)
-    print(json.dumps(sections, ensure_ascii=False, indent=2))
+
+    if args.digest:
+        # 確認用の器。本番では run_daily.py が digest_url なども含めて組み立てる
+        output: Any = {
+            "generated_at": generated_at.isoformat(),
+            "digest_url": None,
+            "sections": sections,
+        }
+    else:
+        output = sections
+    print(json.dumps(output, ensure_ascii=False, indent=2))
 
     total = sum(len(s["items"]) for s in sections)
     print(

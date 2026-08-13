@@ -3,19 +3,21 @@
 # このファイルの編集だけでフィードを増減できること。コード変更を伴わせないこと。
 #
 # ─────────────────────────────────────────────────────────────────────────
-# ⚠ 以下の URL はすべて「未検証の候補」です。
+# 疎通確認: 2026-08-13 に Raspberry Pi 上で 8 件すべて OK。
+#           全フィードがタイムゾーン付きの日時を返していた（TZ 無し・日時欠けは 0 件）。
 #
-#   これらを書いた環境は外向き通信が GitHub 以外ブロックされており、疎通確認が
-#   できませんでした。Raspberry Pi 上で次を実行し、結果を見て確定してください。
+# 購読先を足したり、しばらく運用したあとで確認するときは:
 #
-#       python3 -m collectors.feeds --check
+#     python3 -m collectors.feeds --check
 #
-#   各フィードの HTTP ステータス / パース可否 / 24 時間以内の件数 / 日時欄の
-#   有無とタイムゾーンの有無が表で出ます。失敗が 1 つでもあれば終了コードは 1 です。
-#   同時に取得内容を tests/fixtures/ へ保存しておくと、以後ネットワークなしで
-#   収集ロジックを検証できます。
+# 各フィードの HTTP ステータス / パース可否 / 24 時間以内の件数 / limit による
+# 切り捨ての有無 / 日時のタイムゾーンの有無が表で出ます。
+# 失敗が 1 つでもあれば終了コードは 1 です。
 #
-#       python3 -m collectors.feeds --check --save-fixtures tests/fixtures
+# 取得した内容をそのまま fixture として保存しておくと、以後ネットワークなしで
+# 収集ロジックを検証できます:
+#
+#     python3 -m collectors.feeds --check --save-fixtures tests/fixtures
 # ─────────────────────────────────────────────────────────────────────────
 
 defaults:
@@ -44,7 +46,8 @@ sections:
     title: 時事ニュース
     emoji: "📰"
     feeds:
-      # 一次情報を先に置く。Google News が同じ記事を配信した場合こちらが残る
+      # 一次情報を先に置く。Google News が同じ記事を配信した場合こちらが残る。
+      # このフィードは全体で 7 件程度しか無いので limit は効かない
       - name: NHK 主要
         url: https://www.nhk.or.jp/rss/news/cat0.xml
       - name: Google News
@@ -69,7 +72,8 @@ sections:
     title: AI
     emoji: "🤖"
     feeds:
-      # arXiv の日次リストは 1 日 100 件規模になる。必ず絞る
+      # arXiv の日次リストは実測 306 件。必ず絞る。
+      # ただし絞り方はフィードの並び順の先頭 5 件で、注目度順ではない
       - name: arXiv cs.AI
         url: https://export.arxiv.org/rss/cs.AI
         limit: 5
