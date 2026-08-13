@@ -1,0 +1,20 @@
+# 認証情報 - 絶対にコミットしない
+.env
+*.env
+!.env.example
+
+# 生成物
+data/digest.json
+data/archive/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# OS
+.DS_Store
+Thumbs.db

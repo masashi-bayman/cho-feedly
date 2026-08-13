@@ -1,0 +1,12 @@
+[Unit]
+Description=Run daily digest every morning at 06:00 JST
+
+[Timer]
+OnCalendar=*-*-* 06:00:00
+# Pi の電源が落ちていて実行を逃した場合、起動後に追いかけて実行する
+Persistent=true
+# 情報源への集中アクセスを避けるため 0〜300 秒のばらつきを持たせる
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

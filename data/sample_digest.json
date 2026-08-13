@@ -1,0 +1,100 @@
+{
+  "generated_at": "2026-08-13T06:00:00+09:00",
+  "digest_url": "https://portal.example.com/daily/2026-08-13/",
+  "sections": [
+    {
+      "id": "market",
+      "title": "マーケット",
+      "emoji": "📈",
+      "type": "market",
+      "items": [
+        { "name": "日経平均", "value": "38,120.55", "change": "+1.24%" },
+        { "name": "TOPIX", "value": "2,745.10", "change": "+0.88%" },
+        { "name": "S&P500", "value": "5,620.31", "change": "-0.35%" },
+        { "name": "USD/JPY", "value": "148.62", "change": "+0.41%" },
+        { "name": "eMAXIS Slim 米国株式(S&P500)", "value": "31,204", "change": "-0.30%" },
+        { "name": "eMAXIS Slim 全世界株式(オール・カントリー)", "value": "27,880", "change": "-0.18%" }
+      ]
+    },
+    {
+      "id": "news",
+      "title": "時事ニュース",
+      "emoji": "📰",
+      "type": "links",
+      "items": [
+        {
+          "title": "政府、半導体分野への追加投資を決定",
+          "url": "https://www3.nhk.or.jp/news/html/example001.html",
+          "source": "NHK",
+          "summary": null,
+          "published_at": "2026-08-13T05:12:00+09:00"
+        },
+        {
+          "title": "関西エリア、来週前半にかけて猛暑続く見込み",
+          "url": "https://www3.nhk.or.jp/news/html/example002.html",
+          "source": "NHK",
+          "summary": null,
+          "published_at": "2026-08-13T04:40:00+09:00"
+        },
+        {
+          "title": "日銀、金融政策の現状維持を発表",
+          "url": "https://news.example.com/economy/example003.html",
+          "source": "Google News",
+          "summary": null,
+          "published_at": "2026-08-12T23:05:00+09:00"
+        }
+      ]
+    },
+    {
+      "id": "game",
+      "title": "ゲーム",
+      "emoji": "🎮",
+      "type": "links",
+      "items": [
+        {
+          "title": "格闘ゲーム新作、バランス調整パッチの詳細が公開",
+          "url": "https://www.4gamer.net/games/example/G000001/",
+          "source": "4Gamer",
+          "summary": null,
+          "published_at": "2026-08-13T02:00:00+09:00"
+        },
+        {
+          "title": "インディー系アクション、国内配信日が決定",
+          "url": "https://automaton-media.com/articles/example004/",
+          "source": "AUTOMATON",
+          "summary": null,
+          "published_at": "2026-08-12T21:30:00+09:00"
+        }
+      ]
+    },
+    {
+      "id": "ai",
+      "title": "AI",
+      "emoji": "🤖",
+      "type": "links",
+      "items": [
+        {
+          "title": "新しい長文コンテキスト手法に関する論文が公開",
+          "url": "https://arxiv.org/abs/2608.00001",
+          "source": "arXiv",
+          "summary": null,
+          "published_at": "2026-08-13T01:00:00+09:00"
+        },
+        {
+          "title": "推論モデルの評価ベンチマークをめぐる議論",
+          "url": "https://news.ycombinator.com/item?id=99999999",
+          "source": "Hacker News",
+          "summary": null,
+          "published_at": "2026-08-12T20:15:00+09:00"
+        },
+        {
+          "title": "オンデバイス推論の最適化に関する技術記事",
+          "url": "https://example.dev/blog/on-device-inference",
+          "source": "はてブ テクノロジー",
+          "summary": null,
+          "published_at": "2026-08-12T18:00:00+09:00"
+        }
+      ]
+    }
+  ]
+}

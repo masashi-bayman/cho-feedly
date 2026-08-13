@@ -1,0 +1,23 @@
+[Unit]
+Description=Daily information digest
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=pi
+WorkingDirectory=/home/pi/daily-digest
+EnvironmentFile=/home/pi/daily-digest/.env
+ExecStart=/home/pi/daily-digest/.venv/bin/python run_daily.py
+
+# 起動直後は名前解決が不安定なことがあるため少し待つ
+ExecStartPre=/bin/sleep 15
+
+# ネットワーク不調時に居座らせない
+TimeoutStartSec=600
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
