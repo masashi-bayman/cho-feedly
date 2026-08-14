@@ -165,6 +165,13 @@ sections:
       - name: はてブ テクノロジー
         url: https://b.hatena.ne.jp/hotentry/it.rss
 
+      # 作者が手で足していたもの。git の競合で一度消したので正式に入れ直した。
+      # 扱う範囲が広く（ガジェット・科学・食べ物まで）件数も多い媒体なので
+      # limit を絞ってある。別の欄の方が合うなら 3 行動かすだけ
+      - name: GIGAZINE
+        url: https://gigazine.net/news/rss_2.0/
+        limit: 3
+
       # news.ycombinator.com/rss は pubDate を持たない。日時が付く hnrss を使う。
       # frontpage をそのまま入れると AI と無関係な技術ニュースが大半を占めたため、
       # 2026-08-13 に検索クエリ付きへ変更した。
