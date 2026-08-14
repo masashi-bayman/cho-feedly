@@ -33,6 +33,22 @@ free_game_words: &free_game_words
   - 0円          # Game*Spark の【2,950円→0円】形式に効く
   - フリープレイ   # PS Plus のフリープレイ
 
+# ゲーム欄で埋まりがちな、スマホゲームの運営更新を表す語。
+# 「発売・開発・大型アップデートの情報だけ欲しい」という要望に対する対処。
+#
+# あえて控えめにしてある。取りこぼしより誤爆の方が困るため、本物のニュースにも
+# 使われる語（復刻・ピックアップ・コラボ・周年）は入れていない。
+#   「復刻」   → レトロゲームの復刻版発売
+#   「ピックアップ」→ 4Gamer の「注目タイトルをピックアップ」
+# 埋まるようなら足してください。1 行増やすだけです。
+game_noise_words: &game_noise_words
+  - ガチャ
+  - ログインボーナス
+  - ログボ
+  - 出現率
+  - 排出率
+  - 開催記念キャンペーン
+
 defaults:
   window_hours: 24                # generated_at から遡る時間。これより古い記事は捨てる
   timeout: 15                      # 1 フィードあたりの取得タイムアウト(秒)
@@ -63,6 +79,22 @@ sections:
       # このフィードは全体で 7 件程度しか無いので limit は効かない
       - name: NHK 主要
         url: https://www.nhk.or.jp/rss/news/cat0.xml
+
+      # ⚠ ここから 2 件は未検証。--check で確認すること。
+      #   NG だったら --probe でその媒体のトップページを調べ直せます:
+      #       python3 -m collectors.feeds --probe https://news.yahoo.co.jp/
+      #
+      # NHK 1 本だと、NHK が落ちた日に時事欄が丸ごと空になる。
+      # 「各所から拾って世間に取り残されないように」という要望への対処も兼ねて
+      # 別系統の媒体を足す。Yahoo! のトピックスは編集部が選んだ「いま世間で
+      # 話題になっているもの」なので、この用途と相性がいい
+      - name: Yahoo!ニュース
+        url: https://news.yahoo.co.jp/rss/topics/top-picks.xml
+        limit: 5
+      - name: 朝日新聞
+        url: https://www.asahi.com/rss/asahi/newsheadlines.rdf
+        limit: 5
+
       # 2026-08-13 に無効化。実運用で 2 つ問題が出たため:
       #   1. 運んでくる記事がほぼ NHK と重複していた。しかも NHK 側が見出しを
       #      更新すると（「18市」→「20自治体」）重複と判定できずに二重掲載される
@@ -102,16 +134,37 @@ sections:
         url: https://automaton-media.com/feed/
       - name: Game*Spark
         url: https://www.gamespark.jp/rss20/index.rdf
+      # ⚠ 未検証。開発者インタビューや制作の話が多い媒体なので
+      #   「開発情報も欲しい」という要望に合う
+      - name: 電ファミニコゲーマー
+        url: https://news.denfaminicogamer.jp/feed
+        limit: 5
 
   - id: game
     title: ゲーム
     emoji: "🎮"
+    # スマホゲームの運営更新でこの欄が埋まるのを防ぐ
+    exclude: *game_noise_words
     feeds: *game_feeds
 
   - id: ai
     title: AI
     emoji: "🤖"
     feeds:
+      # 日本語の媒体を先に置く。「英語だと分かりづらい」という要望への対処で、
+      # 同じ話題を両方が扱った場合は日本語側が残る（先に宣言した方が勝つ）。
+      #
+      # ⚠ ここから 2 件は未検証。--check で確認すること
+      - name: ITmedia AI+
+        url: https://rss.itmedia.co.jp/rss/2.0/aiplus.xml
+        limit: 5
+      - name: Publickey
+        url: https://www.publickey1.jp/atom.xml
+        limit: 5
+
+      - name: はてブ テクノロジー
+        url: https://b.hatena.ne.jp/hotentry/it.rss
+
       # news.ycombinator.com/rss は pubDate を持たない。日時が付く hnrss を使う。
       # frontpage をそのまま入れると AI と無関係な技術ニュースが大半を占めたため、
       # 2026-08-13 に検索クエリ付きへ変更した。
@@ -120,8 +173,6 @@ sections:
         url: "https://hnrss.org/newest?q=AI&points=50"
         limit: 5
         assume_timezone: UTC
-      - name: はてブ テクノロジー
-        url: https://b.hatena.ne.jp/hotentry/it.rss
 
       # 2026-08-13 に無効化。1 日 306 件のうち先頭 5 件を取るだけで、
       # その 5 件は注目度順でも関連度順でもない実質ランダムだった。
