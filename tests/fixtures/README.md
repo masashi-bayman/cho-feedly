@@ -73,11 +73,20 @@ python3 -m collectors.market --check --save-fixtures tests/fixtures
 | `market__N225.json` | 日足がそろった通常のケース |
 | `market__GSPC.json` | 休場日の `null` が混ざったケース。`null` を除いた末尾 2 本で前日比を計算する |
 | `market__USDJPY_X.json` | 日足が 1 本も確定していないケース。`meta` の値で補う |
-| `market__TPX.json` | 記号が存在しないケース。この 1 銘柄だけ落として他は返る |
+| `market__TPX.json` | 記号が存在しないケース。**現在 TOPIX は `enabled: false` なので読まれません**。復活させたときのために残しています |
 
-`python3 -m collectors.market --fixtures tests/fixtures` で 4 銘柄中 3 件になります。
+`python3 -m collectors.market --fixtures tests/fixtures` で 6 銘柄中 3 件になります。
 値は `data/sample_digest.json` と一致するように作ってあるので、
 桁区切りと符号の付き方をそのまま見比べられます。
 
-TOPIX が落ちるのは**意図した結果**です。1 銘柄が取れなくても他が返ることを、
-実行するたびに確認するためのケースです。
+NASDAQ / 米10年債 / ビットコインの fixture は**わざと置いていません**。
+1 銘柄が取れなくても他が返ることを、実行するたびに確認するためです。
+
+## 投資信託（source: csv）
+
+`market.yaml` の `source: csv` は運用会社の基準価額 CSV を読みます。
+fixture のファイル名は `market__{銘柄名}.csv` です（例: `market__オルカン.csv`）。
+`--check --save-fixtures` で現物を保存すると、この名前で置かれます。
+
+CSV は Shift_JIS のことが多いので文字コードは自動判定します。
+新しい順・古い順のどちらで並んでいても、日付を見て最新 2 営業日を取ります。

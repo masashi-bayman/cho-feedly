@@ -27,6 +27,8 @@ yfinance を使わない理由:
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
 import logging
 import re
@@ -77,16 +79,38 @@ class QuoteError(RuntimeError):
 
 @dataclass(frozen=True)
 class SymbolConfig:
+    """1 銘柄の設定。
+
+    source が取得方法を決める:
+      yahoo : Yahoo Finance の公開 JSON。symbol に記号を書く（指数・為替・株式）
+      csv   : 運用会社が公開している基準価額 CSV。url に場所を書く（国内の投資信託）
+    """
+
     name: str
-    symbol: str
+    source: str
     decimals: int
-    range: str
     timeout: int
+    symbol: str = ""
+    range: str = "5d"
+    url: str = ""
+    encoding: str = "auto"
+    value_column: str = "基準価額"
+
+    @property
+    def slug(self) -> str:
+        key = self.symbol if self.source == "yahoo" else self.name
+        return SLUG_RE.sub("_", key).strip("_") or "unnamed"
 
     @property
     def fixture_name(self) -> str:
         """--fixtures / --save-fixtures で使うファイル名。設定から一意に決まる。"""
-        return f"market__{SLUG_RE.sub('_', self.symbol).strip('_') or 'unnamed'}.json"
+        suffix = "json" if self.source == "yahoo" else "csv"
+        return f"market__{self.slug}.{suffix}"
+
+    @property
+    def location(self) -> str:
+        """ログや --check の表に出す、取得元を表す文字列。"""
+        return self.symbol if self.source == "yahoo" else (self.url or "(url 未設定)")
 
 
 @dataclass
@@ -97,14 +121,20 @@ class MarketConfig:
     symbols: list[SymbolConfig] = field(default_factory=list)
 
 
-def _as_number(value: Any, fallback: float, label: str) -> float:
+def _as_number(value: Any, fallback: float, label: str, minimum: float = None) -> float:
+    """数値として読む。minimum を下回る値は fallback に落とす。
+
+    minimum の既定は「正の数」。ただし decimals は 0 が正当な指定なので、
+    そこだけ minimum=0 を渡す。
+    """
+    threshold = minimum if minimum is not None else 1e-9
     try:
         number = float(value)
     except (TypeError, ValueError):
         LOG.warning("%s の値 %r を数値として解釈できません。%r を使います", label, value, fallback)
         return fallback
-    if number <= 0:
-        LOG.warning("%s は正の数である必要があります (%r)。%r を使います", label, value, fallback)
+    if number < threshold:
+        LOG.warning("%s は %g 以上である必要があります (%r)。%r を使います", label, threshold, value, fallback)
         return fallback
     return number
 
@@ -133,7 +163,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> MarketConfig:
     if not isinstance(raw_symbols, list) or not raw_symbols:
         raise ConfigError(f"{path} に symbols が定義されていません")
 
-    default_decimals = int(_as_number(defaults["decimals"], 2, "defaults.decimals"))
+    default_decimals = int(_as_number(defaults["decimals"], 2, "defaults.decimals", minimum=0))
     default_timeout = int(_as_number(defaults["timeout"], 15, "defaults.timeout"))
     default_range = str(defaults["range"])
 
@@ -143,23 +173,40 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> MarketConfig:
             LOG.warning("symbols[%d] がマッピングではありません。読み飛ばします", index)
             continue
 
-        ticker = str(raw_symbol.get("symbol") or "").strip()
         name = str(raw_symbol.get("name") or "").strip()
-        if not ticker:
+        source = str(raw_symbol.get("source") or "yahoo").strip().lower()
+        ticker = str(raw_symbol.get("symbol") or "").strip()
+        url = str(raw_symbol.get("url") or "").strip()
+
+        if source not in ("yahoo", "csv"):
+            LOG.warning("symbols[%d] (%s) の source %r は不明です。読み飛ばします", index, name or "?", source)
+            continue
+        if source == "yahoo" and not ticker:
             LOG.warning("symbols[%d] (%s) に symbol がありません。読み飛ばします", index, name or "?")
             continue
+        if source == "csv" and not url:
+            LOG.warning(
+                "%s は source: csv ですが url が未設定です。読み飛ばします "
+                "（運用会社のファンドページにある基準価額 CSV の URL を入れてください）",
+                name or f"symbols[{index}]",
+            )
+            continue
         if not name:
-            name = ticker
+            name = ticker or url
 
         if raw_symbol.get("enabled", True) is False:
-            LOG.info("%s (%s) は enabled: false のため対象外です", name, ticker)
+            LOG.info("%s は enabled: false のため対象外です", name)
             continue
 
         symbols.append(
             SymbolConfig(
                 name=name,
+                source=source,
                 symbol=ticker,
-                decimals=int(_as_number(raw_symbol.get("decimals", default_decimals), default_decimals, f"{name}.decimals")),
+                url=url,
+                encoding=str(raw_symbol.get("encoding", "auto")),
+                value_column=str(raw_symbol.get("value_column", "基準価額")),
+                decimals=int(_as_number(raw_symbol.get("decimals", default_decimals), default_decimals, f"{name}.decimals", minimum=0)),
                 range=str(raw_symbol.get("range", default_range)),
                 timeout=int(_as_number(raw_symbol.get("timeout", default_timeout), default_timeout, f"{name}.timeout")),
             )
@@ -202,16 +249,17 @@ class NetworkSource:
             time.sleep(remaining)
 
     def fetch(self, symbol: SymbolConfig) -> bytes:
-        # ^N225 や USDJPY=X の記号をそのまま URL に置くと壊れる環境があるので符号化する
-        url = CHART_ENDPOINT.format(symbol=quote(symbol.symbol, safe=""))
+        if symbol.source == "csv":
+            url, params = symbol.url, None
+        else:
+            # ^N225 や USDJPY=X の記号をそのまま URL に置くと壊れる環境があるので符号化する
+            url = CHART_ENDPOINT.format(symbol=quote(symbol.symbol, safe=""))
+            params = {"range": symbol.range, "interval": "1d"}
+
         host = urlsplit(url).netloc.lower()
         self._wait_for_host(host)
         try:
-            response = self.session.get(
-                url,
-                params={"range": symbol.range, "interval": "1d"},
-                timeout=symbol.timeout,
-            )
+            response = self.session.get(url, params=params, timeout=symbol.timeout)
         finally:
             self._last_seen[host] = time.monotonic()
         response.raise_for_status()
@@ -299,6 +347,92 @@ def parse_quote(raw: bytes, symbol: SymbolConfig) -> tuple[float, float]:
     return current, previous
 
 
+# ---------------------------------------------------------------------------
+# 投資信託の基準価額 CSV
+# ---------------------------------------------------------------------------
+# 国内の運用会社が出す CSV は Shift_JIS のことが多い。BOM 付き UTF-8 も混ざる。
+# 上から順に試して、日本語のヘッダが化けずに読めたものを採用する
+CSV_ENCODINGS = ("utf-8-sig", "cp932", "utf-8", "euc_jp")
+
+# CSV 内で日付を表す列。ヘッダにこの語が含まれる列を探す
+DATE_COLUMN_HINTS = ("年月日", "日付", "基準日", "date")
+
+
+def decode_csv(raw: bytes, encoding: str) -> str:
+    """CSV のバイト列を文字列にする。encoding が auto なら順に試す。"""
+    if encoding and encoding.lower() != "auto":
+        return raw.decode(encoding, errors="replace")
+
+    for candidate in CSV_ENCODINGS:
+        try:
+            text = raw.decode(candidate)
+        except (UnicodeDecodeError, LookupError):
+            continue
+        # 化けた場合は置換文字が入る。それが無ければ採用する
+        if "�" not in text:
+            LOG.debug("CSV の文字コードを %s と判定しました", candidate)
+            return text
+    LOG.warning("CSV の文字コードを判定できません。cp932 として読みます")
+    return raw.decode("cp932", errors="replace")
+
+
+def _to_number(text: str) -> float | None:
+    """"27,880" や "27,880 円" のような値を数値にする。"""
+    cleaned = re.sub(r"[^\d.\-]", "", str(text))
+    if not cleaned or cleaned in ("-", "."):
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def parse_fund_csv(raw: bytes, symbol: SymbolConfig) -> tuple[float, float]:
+    """基準価額 CSV から (最新, 前営業日) を返す。取り出せなければ QuoteError。"""
+    text = decode_csv(raw, symbol.encoding)
+    rows = list(csv.reader(io.StringIO(text)))
+    rows = [r for r in rows if any(str(c).strip() for c in r)]
+    if len(rows) < 2:
+        raise QuoteError("CSV に行がありません")
+
+    header = [str(c).strip() for c in rows[0]]
+
+    value_index = next(
+        (i for i, h in enumerate(header) if symbol.value_column in h),
+        None,
+    )
+    if value_index is None:
+        raise QuoteError(f"列 {symbol.value_column!r} が見つかりません（ヘッダ: {'/'.join(header[:6])}）")
+
+    date_index = next(
+        (i for i, h in enumerate(header) if any(hint in h.lower() for hint in DATE_COLUMN_HINTS)),
+        0,
+    )
+
+    # (日付文字列, 値) を集める。値が読めない行は捨てる
+    records: list[tuple[str, float]] = []
+    for row in rows[1:]:
+        if value_index >= len(row):
+            continue
+        value = _to_number(row[value_index])
+        if value is None:
+            continue
+        date_text = str(row[date_index]).strip() if date_index < len(row) else ""
+        records.append((date_text, value))
+
+    if len(records) < 2:
+        raise QuoteError(f"基準価額の行が {len(records)} 件しかありません")
+
+    # 新しい順に並ぶ CSV と古い順に並ぶ CSV の両方がある。日付で判定する
+    if records[0][0] > records[-1][0]:
+        records.reverse()
+
+    current, previous = records[-1][1], records[-2][1]
+    if previous == 0:
+        raise QuoteError("前営業日の基準価額が 0 です")
+    return current, previous
+
+
 def format_value(value: float, decimals: int) -> str:
     """桁区切り済みの文字列にする。digest.json では数値ではなく文字列で持つ。"""
     return f"{value:,.{decimals}f}"
@@ -329,26 +463,29 @@ def collect_symbol(symbol: SymbolConfig, source: NetworkSource | FixtureSource) 
     try:
         raw = source.fetch(symbol)
     except requests.exceptions.Timeout:
-        LOG.warning("%s (%s): タイムアウト (%d 秒)", symbol.name, symbol.symbol, symbol.timeout)
+        LOG.warning("%s (%s): タイムアウト (%d 秒)", symbol.name, symbol.location, symbol.timeout)
         return QuoteResult(symbol, False, "TIMEOUT", note=f"{symbol.timeout}s")
     except requests.exceptions.HTTPError as exc:
         code = exc.response.status_code if exc.response is not None else "?"
-        LOG.warning("%s (%s): HTTP %s", symbol.name, symbol.symbol, code)
+        LOG.warning("%s (%s): HTTP %s", symbol.name, symbol.location, code)
         return QuoteResult(symbol, False, f"HTTP {code}", note="記号違いの可能性" if code == 404 else "")
     except FileNotFoundError as exc:
-        LOG.warning("%s (%s): %s", symbol.name, symbol.symbol, exc)
+        LOG.warning("%s (%s): %s", symbol.name, symbol.location, exc)
         return QuoteResult(symbol, False, "NO FIXTURE", note=symbol.fixture_name)
     except Exception as exc:
-        LOG.warning("%s (%s): 取得に失敗しました (%s)", symbol.name, symbol.symbol, exc)
+        LOG.warning("%s (%s): 取得に失敗しました (%s)", symbol.name, symbol.location, exc)
         return QuoteResult(symbol, False, "ERROR", note=type(exc).__name__)
 
     try:
-        current, previous = parse_quote(raw, symbol)
+        if symbol.source == "csv":
+            current, previous = parse_fund_csv(raw, symbol)
+        else:
+            current, previous = parse_quote(raw, symbol)
     except QuoteError as exc:
-        LOG.warning("%s (%s): %s", symbol.name, symbol.symbol, exc)
+        LOG.warning("%s (%s): %s", symbol.name, symbol.location, exc)
         return QuoteResult(symbol, False, "NO DATA", raw=raw, note=str(exc))
     except Exception as exc:
-        LOG.warning("%s (%s): 解釈に失敗しました (%s)", symbol.name, symbol.symbol, exc)
+        LOG.warning("%s (%s): 解釈に失敗しました (%s)", symbol.name, symbol.location, exc)
         return QuoteResult(symbol, False, "PARSE NG", raw=raw, note=type(exc).__name__)
 
     item = {
@@ -356,7 +493,7 @@ def collect_symbol(symbol: SymbolConfig, source: NetworkSource | FixtureSource) 
         "value": format_value(current, symbol.decimals),
         "change": format_change(current, previous),
     }
-    LOG.info("%s (%s): %s %s", symbol.name, symbol.symbol, item["value"], item["change"])
+    LOG.info("%s (%s): %s %s", symbol.name, symbol.location, item["value"], item["change"])
     return QuoteResult(symbol, True, "OK", item=item, raw=raw)
 
 
@@ -431,11 +568,11 @@ def pad(text: str, width: int) -> str:
 
 
 def print_check_table(results: list[QuoteResult]) -> None:
-    headers = ["銘柄", "記号", "状態", "値", "前日比", "備考"]
+    headers = ["銘柄", "取得元", "状態", "値", "前日比", "備考"]
     rows = [
         [
             r.symbol.name,
-            r.symbol.symbol,
+            r.symbol.location,
             r.status,
             (r.item or {}).get("value", "-"),
             (r.item or {}).get("change", "-"),
@@ -460,7 +597,7 @@ def print_check_table(results: list[QuoteResult]) -> None:
     if failed:
         print(f"[NG] {len(failed)} 件の銘柄が失敗しました:", file=sys.stderr)
         for r in failed:
-            print(f"        {r.symbol.name} ({r.symbol.symbol}): {r.status} {r.note}".rstrip(), file=sys.stderr)
+            print(f"        {r.symbol.name} ({r.symbol.location}): {r.status} {r.note}".rstrip(), file=sys.stderr)
         print("     記号が違う場合は config/market.yaml の symbol を直してください。", file=sys.stderr)
     else:
         print(f"[OK] {len(results)} 件すべて取得できました", file=sys.stderr)
@@ -502,7 +639,7 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         for symbol in config.symbols:
-            print(f"  {symbol.name} ({symbol.symbol})", file=sys.stderr)
+            print(f"  {symbol.name} ({symbol.location})", file=sys.stderr)
         return 0
 
     if args.check:
