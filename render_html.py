@@ -64,6 +64,7 @@ SECTION_ACCENTS: dict[str, str] = {
     "market": "#2e8b57",
     "news": "#4169e1",
     "game": "#d2691e",
+    "freegame": "#1e9e62",
     "ai": "#8a2be2",
 }
 DEFAULT_ACCENT = "#5865f2"

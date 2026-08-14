@@ -42,6 +42,7 @@ SECTION_COLORS: dict[str, int] = {
     "market": 0x2E8B57,
     "news": 0x4169E1,
     "game": 0xD2691E,
+    "freegame": 0x1E9E62,
     "ai": 0x8A2BE2,
 }
 DEFAULT_COLOR = 0x5865F2

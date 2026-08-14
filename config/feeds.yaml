@@ -20,8 +20,21 @@
 #     python3 -m collectors.feeds --check --save-fixtures tests/fixtures
 # ─────────────────────────────────────────────────────────────────────────
 
+# 「有料だったものが無料になった／配布される」を表す語。
+# ゲーム欄では除外し、無料配布欄では抽出条件に使う。1 箇所で管理するため
+# YAML のアンカーにしてある（& が定義、* が参照）。
+# 判定は全角半角と大文字小文字を無視した部分一致。
+free_game_words: &free_game_words
+  - 無料配布
+  - 無料化
+  - 無料入手
+  - 無料プレゼント
+  - 期間限定無料
+  - 0円          # Game*Spark の【2,950円→0円】形式に効く
+  - フリープレイ   # PS Plus のフリープレイ
+
 defaults:
-  window_hours: 24                 # generated_at から遡る時間。これより古い記事は捨てる
+  window_hours: 24                # generated_at から遡る時間。これより古い記事は捨てる
   timeout: 15                      # 1 フィードあたりの取得タイムアウト(秒)
   per_feed_limit: 10               # 1 フィードから採用する最大件数
   host_delay: 1.0                  # 同一ホストへの連続アクセスの最小間隔(秒)
@@ -62,16 +75,38 @@ sections:
         limit: 5
         strip_title_suffix: true
 
-  - id: game
-    title: ゲーム
-    emoji: "🎮"
-    feeds:
+  # Steam / Epic などで「有料だったものが無料になった・配布される」情報だけを集める欄。
+  # 基本プレイ無料のゲームは山ほどあって切りが無いので、それは拾わない。
+  #
+  # 情報源はゲーム欄と同じ 3 つ。国内のゲームメディアはこの手のニュースを
+  # よく拾うので、新しい購読先を足すより確実。取得は 1 回で共有される。
+  #
+  # ゲーム欄より先に宣言しているのが重要。ここで拾われた記事は重複排除で
+  # ゲーム欄から自動的に消える（先に宣言した方が勝つ）。逆にここで弾かれた
+  # 記事はゲーム欄に流れるので、どちらからも消える事故が起きない。
+  - id: freegame
+    title: 無料配布
+    emoji: "🆓"
+    include: *free_game_words
+    exclude:
+      # 「基本プレイ無料化」は上の 無料化 に引っかかるが、これは対象外。
+      # 弾かれた記事はゲーム欄に出る
+      - 基本プレイ無料
+      - 基本無料
+      - 無料体験
+      - 無料アップデート
+    feeds: &game_feeds
       - name: 4Gamer
         url: https://www.4gamer.net/rss/index.xml
       - name: AUTOMATON
         url: https://automaton-media.com/feed/
       - name: Game*Spark
         url: https://www.gamespark.jp/rss20/index.rdf
+
+  - id: game
+    title: ゲーム
+    emoji: "🎮"
+    feeds: *game_feeds
 
   - id: ai
     title: AI

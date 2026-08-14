@@ -105,6 +105,10 @@ class FeedConfig:
     timeout: int
     assume_timezone: str
     strip_title_suffix: bool
+    # 見出しによる絞り込み。include があれば「どれか 1 つを含む」記事だけ通す。
+    # exclude はどれか 1 つでも含めば捨てる。exclude が優先。
+    include: tuple[str, ...] = ()
+    exclude: tuple[str, ...] = ()
 
     @property
     def fixture_name(self) -> str:
@@ -130,6 +134,36 @@ class Config:
     def all_feeds(self) -> Iterator[FeedConfig]:
         for section in self.sections:
             yield from section.feeds
+
+
+def normalize_for_match(text: str) -> str:
+    """絞り込み用に見出しをならす。全角半角と大文字小文字の揺れを無視する。"""
+    return unicodedata.normalize("NFKC", str(text)).casefold()
+
+
+def _keyword_list(raw: Any, label: str) -> tuple[str, ...]:
+    """YAML の include / exclude を正規化済みのタプルにする。"""
+    if raw is None:
+        return ()
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        LOG.warning("%s は文字列のリストである必要があります。無視します", label)
+        return ()
+    return tuple(normalize_for_match(k) for k in raw if str(k).strip())
+
+
+def title_passes(title: str, include: tuple[str, ...], exclude: tuple[str, ...]) -> bool:
+    """見出しが絞り込み条件を通るか。
+
+    exclude が優先。include が空なら「絞り込みなし」として全部通す。
+    """
+    normalized = normalize_for_match(title)
+    if any(word in normalized for word in exclude):
+        return False
+    if include and not any(word in normalized for word in include):
+        return False
+    return True
 
 
 def slugify(text: str) -> str:
@@ -198,6 +232,10 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
             title=str(raw_section.get("title") or section_id),
             emoji=str(raw_section.get("emoji") or ""),
         )
+        # セクションに書いた条件はその中の全フィードに効く。
+        # フィード側にも書いた場合は両方を足し合わせる
+        section_include = _keyword_list(raw_section.get("include"), f"{section_id}.include")
+        section_exclude = _keyword_list(raw_section.get("exclude"), f"{section_id}.exclude")
 
         for feed_index, raw_feed in enumerate(raw_section.get("feeds") or []):
             if not isinstance(raw_feed, dict):
@@ -225,6 +263,8 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
                     timeout=int(_as_number(raw_feed.get("timeout", default_timeout), default_timeout, f"{name}.timeout")),
                     assume_timezone=str(raw_feed.get("assume_timezone", default_tz)),
                     strip_title_suffix=bool(raw_feed.get("strip_title_suffix", False)),
+                    include=section_include + _keyword_list(raw_feed.get("include"), f"{name}.include"),
+                    exclude=section_exclude + _keyword_list(raw_feed.get("exclude"), f"{name}.exclude"),
                 )
             )
 
@@ -389,6 +429,8 @@ class FeedResult:
     # limit で切る前の、24 時間の窓に入っていた件数。
     # items は limit 適用後なので、両方持っていないと limit の妥当性が判断できない
     in_window: int = 0
+    # include / exclude で落とした件数
+    filtered_out: int = 0
     date_origins: dict[str, int] = field(default_factory=lambda: {"tz": 0, "naive": 0, "none": 0})
     raw: bytes | None = None
     note: str = ""
@@ -438,14 +480,48 @@ class FixtureSource:
 
     def fetch(self, feed: FeedConfig) -> bytes:
         path = self.directory / feed.fixture_name
-        if not path.exists():
-            raise FileNotFoundError(f"fixture がありません: {path}")
-        return path.read_bytes()
+        if path.exists():
+            return path.read_bytes()
+
+        # 同じフィードを複数セクションで使う場合、fixture を人数分置くのは無駄なので
+        # セクション名の違いを無視して探し直す
+        for candidate in sorted(self.directory.glob(f"*__{slugify(feed.name)}.xml")):
+            LOG.debug("%s の代わりに %s を使います", path.name, candidate.name)
+            return candidate.read_bytes()
+        raise FileNotFoundError(f"fixture がありません: {path}")
+
+
+class SharedFetchSource:
+    """同じ URL への取得を 1 回で済ませる薄い覆い。
+
+    1 つのフィードを複数のセクションで使えるようにするための仕組み。
+    無料ゲーム欄はゲーム欄と同じフィードを見て、キーワードで振り分けている。
+    """
+
+    def __init__(self, inner: NetworkSource | FixtureSource) -> None:
+        self.inner = inner
+        self._cache: dict[str, bytes] = {}
+        self._errors: dict[str, Exception] = {}
+
+    def fetch(self, feed: FeedConfig) -> bytes:
+        if feed.url in self._errors:
+            raise self._errors[feed.url]
+        if feed.url in self._cache:
+            LOG.debug("%s は取得済みの内容を使い回します", feed.url)
+            return self._cache[feed.url]
+        try:
+            raw = self.inner.fetch(feed)
+        except Exception as exc:
+            # 同じ URL で 2 回失敗させない。1 回目の失敗をそのまま返す
+            self._errors[feed.url] = exc
+            raise
+        self._cache[feed.url] = raw
+        return raw
 
 
 def collect_feed(
     feed: FeedConfig,
-    source: NetworkSource | FixtureSource,
+    source: NetworkSource | FixtureSource | SharedFetchSource,
     window_start: datetime,
     fetched_at: datetime,
 ) -> FeedResult:
@@ -492,6 +568,10 @@ def collect_feed(
                 # publishers/discord.py 側でも捨てられるが、digest.json に残す意味がない
                 continue
 
+            if not title_passes(title, feed.include, feed.exclude):
+                result.filtered_out += 1
+                continue
+
             published, origin = entry_datetime(entry, assume_tz)
             result.date_origins[origin] += 1
 
@@ -531,9 +611,9 @@ def collect_feed(
         result.total_entries,
         result.in_window,
         len(result.items),
-        f" (limit={feed.limit} で {result.in_window - len(result.items)} 件切り捨て)"
-        if result.in_window > len(result.items)
-        else "",
+        (f" (limit={feed.limit} で {result.in_window - len(result.items)} 件切り捨て)"
+         if result.in_window > len(result.items) else "")
+        + (f" / キーワードで {result.filtered_out} 件除外" if result.filtered_out else ""),
     )
     return result
 
@@ -628,9 +708,10 @@ def collect_with_config(
         source = NetworkSource(config.user_agent, config.host_delay)
         fetched_at = datetime.now(JST)
 
+    shared = SharedFetchSource(source)
     results: dict[str, FeedResult] = {}
     for feed in config.all_feeds():
-        results[feed.fixture_name] = collect_feed(feed, source, window_start, fetched_at)
+        results[feed.fixture_name] = collect_feed(feed, shared, window_start, fetched_at)
 
     ok_count = sum(1 for r in results.values() if r.ok)
     if results and ok_count == 0:
