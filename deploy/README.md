@@ -89,46 +89,89 @@ journalctl -u daily-digest.service -n 50   # ログ確認
 
 ## PWA サイト
 
-`.env` の `DIGEST_OUTPUT_DIR` を設定すると、`run_daily.py` が Discord へ
-配信する前に静的 HTML を生成する。未設定なら生成しない（Discord だけ動く）。
+### プログラムと生成物を混ぜない
+
+置き場所は 2 つあり、役割も所有者も違う。**混ぜてはいけない。**
+
+| | 場所 | 所有者 | 中身 | 更新方法 |
+|---|---|---|---|---|
+| プログラム | `/home/pi/cho-feedly` | `pi` | Python コード、`config/`、`.env` | `git pull` |
+| 生成物 | `/var/www/daily` | `pi` | HTML、`sw.js`、日付ごとのページ | 毎朝 `run_daily.py` が書く |
+
+**リポジトリを web の公開領域へコピーしてはいけない。** `.env` には Discord の
+Webhook URL が入っている。公開ディレクトリへ置くと、設定次第で外から読める
+場所に鍵を置くことになる。`config/*.yaml` や `data/*.json` も同様に、
+外へ出す必要がないものが出てしまう。
+
+**このプロジェクトに「一度コピーするビルド成果物」は存在しない。**
+HTML は毎朝 `render_html.py` がその日の分を書き出す。だから所定の場所を
+`.env` で教えるだけでよく、コピー作業は要らない。
+
+### 出力先を作る
+
+`/var/www/portal/` の中には置かないこと。あの領域はデプロイスクリプトが
+`git reset --hard` するので、置いた生成物が消える。独立した場所にする。
+
+```bash
+sudo mkdir -p /var/www/daily
+sudo chown -R pi:pi /var/www/daily
+```
+
+**所有者は `pi` にすること。`www-data` にしてはいけない。**
+`run_daily.py` は systemd から `pi` として動くので、`www-data` の持ち物にすると
+書き込めずに生成が失敗する。nginx は読めれば十分で、既定の権限
+（ディレクトリ 755 / ファイル 644）で読める。
+
+### .env
 
 ```
 DIGEST_BASE_URL=https://自分のドメイン/daily
-DIGEST_OUTPUT_DIR=/var/www/portal/public/daily
+DIGEST_OUTPUT_DIR=/var/www/daily
 ```
 
-`DIGEST_BASE_URL` は Discord のメッセージに載るリンクに使う。
-`DIGEST_OUTPUT_DIR` へ実際のファイルが出る。両方が同じ場所を指すようにする。
+`DIGEST_BASE_URL` は Discord のメッセージに載るリンク、
+`DIGEST_OUTPUT_DIR` は実際のファイルの出力先。**この 2 つが同じ場所を指すこと。**
 
-**出力先は nginx が配っているディレクトリ（`root`）の配下でなければならない。**
-配下でないと、生成はできてもブラウザからは 404 になる。root の場所を確認する:
+### nginx に配ってもらう
+
+`/var/www/daily` は nginx の `root`（`/var/www/portal/public`）の外にあるので、
+**このままでは 404 になる。** `alias` で結び付ける location を足す。
+
+`root` を書いてある設定ファイルを探して、その `server { }` の中に追記する。
 
 ```bash
-sudo nginx -T 2>/dev/null | grep "root "
+sudo grep -rn "/var/www/portal/public" /etc/nginx/
 ```
-
-出力先は `pi` ユーザーが書ける必要がある。
-
-```bash
-sudo mkdir -p /var/www/portal/public/daily
-sudo chown pi:pi /var/www/portal/public/daily
-```
-
-### ディレクトリを開いても 404 になる場合
-
-PHP アプリが同居していると、`location /` の `try_files` が
-ディレクトリへのアクセスを PHP のフロントコントローラに回してしまうことがある。
-その場合は nginx の server ブロックに、静的配信を優先する location を足す。
 
 ```nginx
 location /daily/ {
+    alias /var/www/daily/;
     try_files $uri $uri/ =404;
     index index.html;
 }
 ```
 
+`alias` の末尾のスラッシュは省略しないこと。`location /daily/` と
+`alias /var/www/daily/;` で、`/daily/2026-08-14/` が
+`/var/www/daily/2026-08-14/index.html` に対応する。
+
+`try_files` を書いているのは、PHP アプリが同居しているため。これが無いと
+`location /` の `try_files` がディレクトリへのアクセスを PHP のフロント
+コントローラへ回してしまい、やはり 404 になる。
+
+反映する前に必ず構文を確認する。**`syntax is ok` が出ない限り reload しないこと。**
+設定を壊すと、同居している既存サイトごと落ちる。
+
 ```bash
 sudo nginx -t && sudo systemctl reload nginx
+```
+
+### 確認
+
+```bash
+.venv/bin/python run_daily.py            # 生成 + 配信
+ls /var/www/daily                        # index.html sw.js manifest.webmanifest 日付ディレクトリ
+curl -I http://localhost/daily/          # Cloudflare を通さず nginx だけ確認。200 なら成功
 ```
 
 digest.json だけから作り直せるので、表示を直したいときは収集し直さなくてよい。
