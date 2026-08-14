@@ -150,6 +150,44 @@ sections:
   - id: ai
     title: AI
     emoji: "🤖"
+    # この欄は AI の話だけにする。
+    #
+    # 情報源（GIGAZINE・はてブ・Hacker News）はどれも扱う範囲が広く、
+    # このキーワードが無いと松屋の試食レビューや海底ケーブルの記事まで並ぶ。
+    #
+    # 英数字のキーワードは単語として一致する（部分一致ではない）ので、
+    # "ai" が email や available に誤爆することはない。日本語は部分一致。
+    #
+    # 取りこぼしはある。「Transformer の新手法」のようにこの語を 1 つも
+    # 含まない記事は落ちる。そこは将来ローカル LLM に任せる部分
+    include:
+      - AI
+      - LLM
+      - 生成AI
+      - 機械学習
+      - ディープラーニング
+      - 深層学習
+      - ニューラル
+      - 大規模言語モデル
+      - ChatGPT
+      - GPT
+      - Claude
+      - Anthropic
+      - OpenAI
+      - Gemini
+      - Copilot
+      - DeepSeek
+      - Llama
+      - Qwen
+      - Mistral
+      - Hugging Face
+      - Stable Diffusion
+      - 画像生成
+      - プロンプト
+      - RAG
+      - ファインチューニング
+      - 推論モデル
+      - NVIDIA
     feeds:
       # 日本語の媒体を先に置く。「英語だと分かりづらい」という要望への対処で、
       # 同じ話題を両方が扱った場合は日本語側が残る（先に宣言した方が勝つ）。
@@ -176,9 +214,11 @@ sections:
       # frontpage をそのまま入れると AI と無関係な技術ニュースが大半を占めたため、
       # 2026-08-13 に検索クエリ付きへ変更した。
       # --check で 24h内 が 0 件に近ければ points を下げるか消すこと
+      # 唯一の英語ソース。和訳できるようになるまでは件数を絞っておく。
+      # 全部日本語にしたければ enabled: false で外せる
       - name: Hacker News
         url: "https://hnrss.org/newest?q=AI&points=50"
-        limit: 5
+        limit: 3
         assume_timezone: UTC
 
       # 2026-08-13 に無効化。1 日 306 件のうち先頭 5 件を取るだけで、

@@ -29,6 +29,7 @@ import sys
 import time
 import unicodedata
 from dataclasses import dataclass, field
+from functools import lru_cache
 from datetime import datetime, timedelta, timezone, tzinfo
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
@@ -153,15 +154,35 @@ def _keyword_list(raw: Any, label: str) -> tuple[str, ...]:
     return tuple(normalize_for_match(k) for k in raw if str(k).strip())
 
 
+@lru_cache(maxsize=512)
+def _compiled_keyword(keyword: str) -> re.Pattern[str] | None:
+    """英数字だけのキーワードは単語として一致させるための正規表現を返す。
+
+    素朴な部分一致だと "ai" が "email" や "available" や "maintain" に当たる。
+    日本語は語の境界が無いので、こちらは部分一致のまま（None を返す）。
+    """
+    if keyword.isascii():
+        return re.compile(rf"(?<![a-z0-9]){re.escape(keyword)}(?![a-z0-9])")
+    return None
+
+
+def keyword_hit(normalized_title: str, keyword: str) -> bool:
+    """正規化済みの見出しにキーワードが含まれるか。"""
+    pattern = _compiled_keyword(keyword)
+    if pattern is not None:
+        return pattern.search(normalized_title) is not None
+    return keyword in normalized_title
+
+
 def title_passes(title: str, include: tuple[str, ...], exclude: tuple[str, ...]) -> bool:
     """見出しが絞り込み条件を通るか。
 
     exclude が優先。include が空なら「絞り込みなし」として全部通す。
     """
     normalized = normalize_for_match(title)
-    if any(word in normalized for word in exclude):
+    if any(keyword_hit(normalized, word) for word in exclude):
         return False
-    if include and not any(word in normalized for word in include):
+    if include and not any(keyword_hit(normalized, word) for word in include):
         return False
     return True
 
