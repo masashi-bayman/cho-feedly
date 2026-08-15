@@ -61,6 +61,7 @@ FALLBACK_DEFAULTS: dict[str, Any] = {
     "chunk_size": 12,
     "num_ctx": 4096,
     "temperature": 0,
+    "keep_alive": "5m",
 }
 
 # 日本語（ひらがな・カタカナ・漢字）が含まれるか。和訳の要否判定に使う
@@ -95,6 +96,7 @@ class CuratorConfig:
     chunk_size: int
     num_ctx: int
     temperature: float
+    keep_alive: str
     rules: dict[str, SectionRule] = field(default_factory=dict)
 
 
@@ -140,6 +142,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> CuratorConfig:
         chunk_size=max(1, int(values["chunk_size"])),
         num_ctx=int(values["num_ctx"]),
         temperature=float(values["temperature"]),
+        keep_alive=str(values["keep_alive"]),
         rules=rules,
     )
 
@@ -159,6 +162,7 @@ class OllamaClient:
             "model": self.config.model,
             "prompt": prompt,
             "stream": False,
+            "keep_alive": self.config.keep_alive,
             "options": {
                 "temperature": self.config.temperature,
                 "num_ctx": self.config.num_ctx,
@@ -182,6 +186,23 @@ class OllamaClient:
             raise CuratorError(f"通信に失敗しました ({type(exc).__name__})") from exc
         except ValueError as exc:
             raise CuratorError("応答が JSON として読めません") from exc
+
+    def unload(self) -> None:
+        """モデルをメモリから降ろす。
+
+        Ollama は既定で 5 分ほどモデルを保持し続ける。1 日 1 回しか使わないので、
+        終わったら明示的に解放する。Pi では 1〜2GB の差になる。
+        失敗しても実害は無い（放っておいてもいずれ解放される）ので握りつぶす。
+        """
+        try:
+            self.session.post(
+                f"{self.config.base_url}/api/generate",
+                json={"model": self.config.model, "keep_alive": 0},
+                timeout=30,
+            )
+            LOG.info("モデルをメモリから解放しました")
+        except Exception as exc:
+            LOG.debug("モデルの解放に失敗しました (%s)", type(exc).__name__)
 
     def available_models(self) -> list[str]:
         response = self.session.get(f"{self.config.base_url}/api/tags", timeout=10)
@@ -391,24 +412,30 @@ def _curate(sections: list[dict[str, Any]], config: CuratorConfig) -> list[dict[
     deadline = time.monotonic() + config.total_budget
     LOG.info("選別を開始します (%s / %s)", config.base_url, config.model)
 
-    for section in sections:
-        rule = config.rules.get(str(section.get("id")))
-        items = section.get("items") or []
-        if rule is None or not items:
-            continue
+    started = time.monotonic()
+    try:
+        for section in sections:
+            rule = config.rules.get(str(section.get("id")))
+            items = section.get("items") or []
+            if rule is None or not items:
+                continue
 
-        before = len(items)
-        if rule.selects:
-            items = select_items(client, items, rule, config.chunk_size, deadline)
-        if rule.translate:
-            items = translate_titles(client, items, deadline)
+            before = len(items)
+            section_started = time.monotonic()
+            if rule.selects:
+                items = select_items(client, items, rule, config.chunk_size, deadline)
+            if rule.translate:
+                items = translate_titles(client, items, deadline)
 
-        section["items"] = items
-        if before != len(items):
-            LOG.info("[%s] %d 件 → %d 件", section.get("id"), before, len(items))
+            section["items"] = items
+            LOG.info("[%s] %d 件 → %d 件 (%.0f 秒)",
+                     section.get("id"), before, len(items), time.monotonic() - section_started)
+    finally:
+        # 途中で何が起きても必ずメモリを返す
+        client.unload()
 
-    remaining = deadline - time.monotonic()
-    LOG.info("選別が終わりました (残り時間 %.0f 秒)", max(0.0, remaining))
+    LOG.info("選別が終わりました (所要 %.0f 秒 / 上限 %.0f 秒)",
+             time.monotonic() - started, config.total_budget)
     return sections
 
 
