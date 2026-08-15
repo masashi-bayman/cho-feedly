@@ -76,6 +76,55 @@ class CuratorError(RuntimeError):
 
 
 # ---------------------------------------------------------------------------
+# メモリの見張り
+#
+# 入りきらないモデルを読み込ませると、Pi は「遅くなる」ではなく「固まる」。
+# 実際に qwen2.5:3b (1.9GB) を空き 2.0GB の Pi で動かして SSH ごと落ちた。
+# OOM killer が間に合わず、電源を抜くしか戻す手が無くなる。
+#
+# 毎朝 6 時に無人で動くものが Pi を落とすのは許容できないので、
+# 読み込ませる前にこちらで断る。断ったときは選別せずそのまま通すだけで、
+# 配信は普段どおり続く。
+# ---------------------------------------------------------------------------
+MEMORY_MARGIN_BYTES = 400 * 1024 * 1024  # 実行時の作業領域として見込む分
+MEMORY_SAFETY_RATIO = 1.15               # 重みの展開などで実測は容量より膨らむ
+
+
+def available_memory() -> int | None:
+    """すぐ使えるメモリ(バイト)。Linux 以外や読めない環境では None。
+
+    MemFree ではなく MemAvailable を見る。キャッシュとして使われている分は
+    必要になれば解放されるので、MemFree は実際より小さく出る。
+    """
+    try:
+        with open("/proc/meminfo", encoding="ascii") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def gib(value: float) -> str:
+    return f"{value / (1024 ** 3):.1f}GB"
+
+
+def memory_verdict(model_bytes: int | None) -> tuple[bool, str]:
+    """このモデルを読み込ませてよいか。(可否, 説明) を返す。
+
+    大きさか空きが分からないときは通す。分からないことを理由に
+    毎朝の選別を止める方が困るし、その場合は今までと同じ挙動になるだけ。
+    """
+    free = available_memory()
+    if model_bytes is None or free is None:
+        return True, "メモリを確認できませんでした（そのまま続けます）"
+    needed = int(model_bytes * MEMORY_SAFETY_RATIO) + MEMORY_MARGIN_BYTES
+    summary = f"モデル {gib(model_bytes)} / 必要 {gib(needed)} / 空き {gib(free)}"
+    return needed <= free, summary
+
+
+# ---------------------------------------------------------------------------
 # 設定
 # ---------------------------------------------------------------------------
 @dataclass
@@ -240,10 +289,24 @@ class OllamaClient:
         except Exception as exc:
             LOG.debug("モデルの解放に失敗しました (%s)", type(exc).__name__)
 
-    def available_models(self) -> list[str]:
+    def installed_models(self) -> list[dict[str, Any]]:
         response = self.session.get(f"{self.config.base_url}/api/tags", timeout=10)
         response.raise_for_status()
-        return [str(m.get("name") or "") for m in response.json().get("models") or []]
+        models = response.json().get("models") or []
+        return [m for m in models if isinstance(m, dict)]
+
+    def available_models(self) -> list[str]:
+        return [str(m.get("name") or "") for m in self.installed_models()]
+
+    def model_size(self, name: str) -> int | None:
+        """モデルの大きさ(バイト)。分からなければ None。"""
+        for model in self.installed_models():
+            found = str(model.get("name") or "")
+            if found == name or found.startswith(name + ":"):
+                size = model.get("size")
+                if isinstance(size, (int, float)) and size > 0:
+                    return int(size)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -728,6 +791,14 @@ def _curate(
                     config.model, ", ".join(models[:5]) or "なし")
         return sections
 
+    # 入りきらないなら読み込ませない。無人で動くものが Pi を固めてはいけない
+    fits, summary = memory_verdict(client.model_size(config.model))
+    if not fits:
+        LOG.warning("メモリが足りないので選別を飛ばします（%s）", summary)
+        LOG.warning("小さいモデルに変えるか、curator.yaml の num_ctx を下げてください")
+        return sections
+    LOG.debug("メモリ確認: %s", summary)
+
     deadline = time.monotonic() + config.total_budget
     style = judge_style(config.judge_style)
     LOG.info("選別を開始します (%s / %s / 聞き方 %s)",
@@ -869,6 +940,16 @@ def run_selftest(config: CuratorConfig, style_names: list[str], verbose: bool) -
         print(f"[NG] Ollama に繋がりません ({type(exc).__name__})", file=sys.stderr)
         return 1
 
+    # 入りきらないモデルを読み込ませると Pi ごと固まる。試す前に断る
+    fits, summary = memory_verdict(client.model_size(config.model))
+    print(f"メモリ: {summary}")
+    if not fits:
+        print(f"\n[NG] {config.model} はこの機械には大きすぎます。試すと固まります",
+              file=sys.stderr)
+        print("     もっと小さいモデルを指定してください:", file=sys.stderr)
+        print("       python3 -m curator.llm --selftest --model gemma2:2b", file=sys.stderr)
+        return 1
+
     total = len(SELFTEST_CASES)
     print(f"モデル: {config.model}")
     print(f"見出し {total} 件（残すべき {SELFTEST_HALF} / 捨てるべき {total - SELFTEST_HALF}）を "
@@ -1003,6 +1084,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"利用可能なモデル: {', '.join(models) or 'なし'}")
         if not any(m == config.model or m.startswith(config.model + ":") for m in models):
             print(f"\n[NG] {config.model} がありません。ollama pull {config.model} を実行してください", file=sys.stderr)
+            return 1
+
+        fits, summary = memory_verdict(client.model_size(config.model))
+        print(f"メモリ: {summary}")
+        if not fits:
+            print("\n[NG] このモデルはこの機械には大きすぎます。読み込ませると固まります",
+                  file=sys.stderr)
+            print("     毎朝の実行では自動的に選別を飛ばすので、配信は止まりません",
+                  file=sys.stderr)
             return 1
 
         started = time.monotonic()
