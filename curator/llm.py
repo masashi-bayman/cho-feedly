@@ -110,6 +110,56 @@ def gib(value: float) -> str:
     return f"{value / (1024 ** 3):.1f}GB"
 
 
+def top_memory_users(limit: int = 4) -> list[tuple[str, int]]:
+    """メモリを食っている順に (名前, バイト)。読めなければ空。
+
+    断ったときに「では何を止めればいいのか」が分からないと詰むので、
+    犯人を名指しできるようにしておく。ps を呼ばず /proc から直接読む。
+    """
+    found: list[tuple[str, int]] = []
+    try:
+        pids = [d for d in os.listdir("/proc") if d.isdigit()]
+    except OSError:
+        return []
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/status", encoding="ascii", errors="replace") as f:
+                name = ""
+                rss = 0
+                for line in f:
+                    if line.startswith("Name:"):
+                        name = line.split(maxsplit=1)[1].strip()
+                    elif line.startswith("VmRSS:"):
+                        rss = int(line.split()[1]) * 1024
+                        break
+            if not rss:
+                continue
+            # node や python は名前だけでは分からないので、コマンド行から手掛かりを拾う
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                cmdline = f.read().replace(b"\0", b" ").decode("utf-8", "replace")
+            for hint in ("vscode-server", "ollama", "nginx", "php-fpm", "tailscaled", "node"):
+                if hint in cmdline:
+                    name = f"{name} ({hint})"
+                    break
+        except (OSError, ValueError, IndexError):
+            continue
+        found.append((name, rss))
+    found.sort(key=lambda x: -x[1])
+    return found[:limit]
+
+
+def print_memory_advice(model_name: str, stream: Any) -> None:
+    """空きが足りないときに、何を止めればよいかを出す。"""
+    print("\n     メモリを使っているもの:", file=stream)
+    for name, rss in top_memory_users():
+        print(f"       {gib(rss):>7}  {name}", file=stream)
+    print("\n     空けてからもう一度試してください:", file=stream)
+    print("       ollama ps            # モデルが載ったままなら ollama stop <名前>", file=stream)
+    print("       VS Code の接続を切る  # Remote-SSH は 1GB 前後を使います", file=stream)
+    print(f"\n     {model_name} より小さいモデルは実用的なものがありません。", file=stream)
+    print("     メモリを空けるのが唯一の道です。", file=stream)
+
+
 def memory_verdict(model_bytes: int | None) -> tuple[bool, str]:
     """このモデルを読み込ませてよいか。(可否, 説明) を返す。
 
@@ -1060,10 +1110,9 @@ def run_selftest(config: CuratorConfig, style_names: list[str], verbose: bool) -
     fits, summary = memory_verdict(client.model_size(config.model))
     print(f"メモリ: {summary}")
     if not fits:
-        print(f"\n[NG] {config.model} はこの機械には大きすぎます。試すと固まります",
+        print(f"\n[NG] 今は空きが足りません。読み込ませると固まります ({config.model})",
               file=sys.stderr)
-        print("     もっと小さいモデルを指定してください:", file=sys.stderr)
-        print("       python3 -m curator.llm --selftest --model gemma2:2b", file=sys.stderr)
+        print_memory_advice(config.model, sys.stderr)
         return 1
 
     total = len(SELFTEST_CASES)
@@ -1204,10 +1253,10 @@ def main(argv: list[str] | None = None) -> int:
         fits, summary = memory_verdict(client.model_size(config.model))
         print(f"メモリ: {summary}")
         if not fits:
-            print("\n[NG] このモデルはこの機械には大きすぎます。読み込ませると固まります",
-                  file=sys.stderr)
+            print("\n[NG] 今は空きが足りません。読み込ませると固まります", file=sys.stderr)
             print("     毎朝の実行では自動的に選別を飛ばすので、配信は止まりません",
                   file=sys.stderr)
+            print_memory_advice(config.model, sys.stderr)
             return 1
 
         started = time.monotonic()
