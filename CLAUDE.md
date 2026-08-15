@@ -12,13 +12,15 @@
 ## アーキテクチャ
 
 ```
-collectors/  →  data/digest.json  →  publishers/
+collectors/  →  curator/  →  data/digest.json  →  publishers/
 ```
 
 `digest.json` が収集側と配信側の唯一の契約。**このスキーマを変更する場合は、
 collectors と publishers の両方、および data/sample_digest.json を必ず同時に更新すること。**
 
 - `collectors/` : 情報源ごとのモジュール。1 ファイル 1 情報源が原則
+- `curator/` : ローカル LLM による選別。セクション配列を受け取って返すだけの
+  変換で、失敗時は入力をそのまま返す。無くても全体は動く
 - `publishers/` : 出力先ごとのモジュール。収集方法を一切知らない
 - `config/feeds.yaml` : 購読する RSS の一覧。コード変更なしで増減できること
 - `run_daily.py` : 全体のオーケストレーション

@@ -10,9 +10,10 @@
 処理の順序:
     1. .env を読む
     2. collectors/ で収集する
-    3. data/digest.json と data/archive/YYYY-MM-DD.json に書く
-    4. render_html.py で PWA サイトを生成する（DIGEST_OUTPUT_DIR がある場合）
-    5. publishers/discord.py で配信する
+    3. curator/ で選別する（Ollama が無ければ飛ばす）
+    4. data/digest.json と data/archive/YYYY-MM-DD.json に書く
+    5. render_html.py で PWA サイトを生成する（DIGEST_OUTPUT_DIR がある場合）
+    6. publishers/discord.py で配信する
 
 4 を 5 より先に置いているのは、Discord のメッセージに載る digest_url を
 タップした先が、届いた時点で既に存在しているようにするため。
@@ -51,6 +52,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import render_html  # noqa: E402
 from collectors import feeds, market  # noqa: E402
+from curator import llm as curator  # noqa: E402
 from envfile import load_dotenv  # noqa: E402
 from publishers import discord as discord_publisher  # noqa: E402
 
@@ -176,6 +178,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="収集から Discord 配信までを通しで実行します")
     parser.add_argument("--dry-run", action="store_true", help="収集はするが送信しない。ファイルも書かない")
     parser.add_argument("--fixtures", metavar="DIR", help="保存済みの応答から収集する（通信しない）")
+    parser.add_argument("--no-curate", action="store_true", help="ローカル LLM による選別を行わない")
     parser.add_argument("--generated-at", metavar="ISO8601", help="基準時刻（既定: 現在時刻）")
     parser.add_argument("--env", default=str(DEFAULT_ENV_PATH), help=".env のパス")
     parser.add_argument(
@@ -213,8 +216,15 @@ def main(argv: list[str] | None = None) -> int:
     LOG.info("収集を開始します (基準時刻 %s / %s)", generated_at.isoformat(), mode)
 
     digest = build_digest(generated_at, fixtures_dir=args.fixtures)
+    LOG.info("収集結果: %s (計 %d件)", summarize(digest), count_items(digest))
+
+    # ローカル LLM による選別。Ollama が無ければ何もせず素通しする。
+    # curate() は例外を投げない契約なので、ここで配信が止まることはない
+    if not args.no_curate:
+        digest["sections"] = curator.curate(digest.get("sections", []))
+        LOG.info("選別後: %s (計 %d件)", summarize(digest), count_items(digest))
+
     total = count_items(digest)
-    LOG.info("収集結果: %s (計 %d件)", summarize(digest), total)
 
     # 「今日は記事が無い日」と「全部落ちた日」は Discord 上で区別が付かない。
     # 空のメッセージを送るより、落ちて journalctl に残す方がよい

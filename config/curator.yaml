@@ -1,0 +1,55 @@
+# ローカル LLM による選別と和訳の設定。
+#
+# この工程は「あれば効く、無くても困らない」もの。Ollama が動いていなければ
+# 丸ごと飛ばして、収集したままの結果で配信する。
+#
+# 動作確認:
+#     python3 -m curator.llm --check                     # Ollama とモデルの疎通
+#     python3 -m curator.llm data/digest.json --dry-run  # LLM を呼ばずに送る内容を見る
+#     python3 -m curator.llm data/digest.json            # 実際に選別して結果を見る
+#
+# プロンプトを変えたら 3 つ目で試すこと。run_daily.py を通さずに何度でも試せる。
+
+defaults:
+  # 接続先。.env の CURATOR_URL / CURATOR_MODEL があればそちらが優先される
+  base_url: http://localhost:11434
+  model: qwen2.5:1.5b
+
+  timeout: 180        # 1 リクエストあたりの上限(秒)
+  total_budget: 900   # 選別全体の上限(秒)。超えたら残りは選別せずそのまま通す
+  chunk_size: 12      # 一度に見せる見出しの数。小さいモデルほど少ない方が正確
+  num_ctx: 4096       # モデルに渡す文脈の広さ
+  temperature: 0      # 毎朝同じ入力なら同じ結果が出るように
+
+# 選別したいセクションだけ書く。書いていないセクションは素通しする。
+# id は feeds.yaml のセクション id と同じ。
+sections:
+  news:
+    select:
+      keep: 6
+      criteria: |
+        残す: 社会全体に影響する出来事。政治、経済、災害、事件、国際情勢の重要な動き。
+        捨てる: 芸能人の話題、スポーツの試合結果、地域限定の細かい話題、天気の通常予報。
+
+  game:
+    select:
+      keep: 8
+      criteria: |
+        残す: 新作の発表、発売日や配信日の決定、大型アップデートの告知、
+              開発の話（開発者インタビュー、技術解説、ゲームエンジン）、
+              Nintendo Direct のような大きな発表番組。
+        捨てる: スマホゲームの運営更新、イベント告知、コラボ告知、グッズ、
+              大会の予選や試合結果、ランキング、細かい不具合修正。
+
+  ai:
+    select:
+      keep: 8
+      criteria: |
+        残す: 新しい AI モデルの発表、ローカル LLM に関する話、
+              API や料金の変更、AI 企業の重要な動き、実際に使える新機能。
+              Claude と Anthropic の話題は優先して残す。
+        捨てる: AI と関係の薄い一般的な技術記事、感想や意見だけの記事。
+    # 日本語でない見出しを訳す。訳せなかったものは原文のまま残す
+    translate: true
+
+  # 無料配布は元々少ないので選別しない（この欄を書かなければ素通し）
