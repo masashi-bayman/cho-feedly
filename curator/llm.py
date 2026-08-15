@@ -60,7 +60,7 @@ FALLBACK_DEFAULTS: dict[str, Any] = {
     "timeout": 180,
     "total_budget": 900,
     "chunk_size": 12,
-    "num_ctx": 4096,
+    "num_ctx": 2048,
     "temperature": 0,
     "keep_alive": "5m",
     "judge_style": "keep_true",
@@ -943,8 +943,10 @@ def run_selftest(config: CuratorConfig, style_names: list[str], verbose: bool) -
         print("この見出しは人間なら迷わず分けられるものばかりなので、")
         print(f"{config.model} にこの仕事は無理だという結論になります。")
         print("\n次の手は 2 つです:")
-        print("  1. 大きいモデルを試す:  ollama pull qwen2.5:3b")
-        print("     そのうえで          python3 -m curator.llm --selftest --model qwen2.5:3b")
+        print("  1. 大きいモデルを試す。今のモデルは消さなくてよい（同時には載らない）")
+        print("       ollama pull qwen2.5:3b")
+        print("       python3 -m curator.llm --selftest --model qwen2.5:3b")
+        print("     メモリが足りずに落ちるなら、一回り小さい gemma2:2b も日本語は強い")
         print("  2. LLM をやめる。curator.yaml の sections を消せば選別工程は素通しになる")
         return 1
 
