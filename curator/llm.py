@@ -79,6 +79,9 @@ class CuratorError(RuntimeError):
 @dataclass
 class SectionRule:
     keep: int = 0
+    # 判定で減りすぎたときに戻す最低件数。0 なら戻さない。
+    # 小さいモデルは「いいえ」に倒れやすく、放っておくと欄ごと空になる
+    min_keep: int = 0
     criteria: str = ""
     translate: bool = False
     # individual: 1 件ずつ「残す/捨てる」を判定する（既定）
@@ -133,6 +136,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> CuratorConfig:
             select = {}
         rules[str(section_id)] = SectionRule(
             keep=int(select.get("keep") or 0),
+            min_keep=int(select.get("min_keep") or 0),
             criteria=str(select.get("criteria") or "").strip(),
             translate=bool(raw_rule.get("translate", False)),
             mode=str(select.get("mode") or "individual").strip().lower(),
@@ -282,11 +286,11 @@ def parse_selection(text: str, count: int, keep: int) -> list[int] | None:
 
 def build_judge_prompt(title: str, criteria: str) -> str:
     return (
-        "次の見出しが条件に当てはまるか判定してください。\n\n"
-        f"【条件】\n{criteria}\n"
+        "次の見出しは、下の「読みたいもの」に当てはまりますか。\n\n"
+        f"【読みたいもの】\n{criteria}\n"
         f"【見出し】\n{title}\n\n"
-        '残すなら {"keep": true}、捨てるなら {"keep": false} と答えてください。\n'
-        "説明は書かないでください。"
+        '当てはまるなら {"keep": true}、当てはまらないなら {"keep": false} '
+        "と答えてください。\n迷ったら true にしてください。説明は書かないでください。"
     )
 
 
@@ -367,8 +371,32 @@ def select_one_by_one(
         elif explain is not None:
             explain.append((title, "捨てる"))
 
-    # 判定できなかったものは捨てない。ただし採用分で足りていれば末尾に回す
+    # 判定できなかったものは捨てない
     result = kept + undecided
+
+    # 減りすぎたときの安全弁。判定を信じきると欄ごと空になることがある
+    if rule.min_keep and len(result) < rule.min_keep:
+        chosen = {id(x) for x in result}
+        restored: set[str] = set()
+        for item in items:
+            if id(item) not in chosen:
+                result.append(item)
+                chosen.add(id(item))
+                restored.add(str(item.get("title", "")))
+                if len(result) >= rule.min_keep:
+                    break
+        LOG.warning("判定で %d 件まで減ったので、新しい順に %d 件まで戻しました",
+                    len(kept), len(result))
+        if explain is not None:
+            # 「捨てる」と出したのに残ったものは、そう見えるようにしておく
+            for i, (title, verdict) in enumerate(explain):
+                if verdict == "捨てる" and title in restored:
+                    explain[i] = (title, "捨てる→戻した")
+
+    # 元の並び（新しい順）に戻す
+    order = {id(x): i for i, x in enumerate(items)}
+    result.sort(key=lambda x: order.get(id(x), 0))
+
     if len(result) > rule.keep:
         result = result[: rule.keep]
     return result
@@ -617,10 +645,18 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"[{section.get('id')}] {len(items)} 件 — 選別しません", file=sys.stderr)
                 continue
             print(f"\n[{section.get('id')}] {len(items)} 件 → 最大 {rule.keep} 件 "
-                  f"(和訳: {'あり' if rule.translate else 'なし'})", file=sys.stderr)
-            if rule.selects:
+                  f"(下限 {rule.min_keep} 件 / 方式 {rule.mode} / "
+                  f"和訳: {'あり' if rule.translate else 'なし'})", file=sys.stderr)
+            if not rule.selects:
+                continue
+            # 実際に投げるものと同じプロンプトを出す
+            if rule.mode == "batch":
                 titles = [str(i.get("title", "")) for i in items[: config.chunk_size]]
                 print(build_select_prompt(titles, rule.keep, rule.criteria), file=sys.stderr)
+            else:
+                title = str(items[0].get("title", ""))
+                print(f"（1 件目の例。実際は {len(items)} 件に同じ形で聞きます）", file=sys.stderr)
+                print(build_judge_prompt(title, rule.criteria), file=sys.stderr)
         print("\n[dry-run] LLM は呼んでいません", file=sys.stderr)
         return 0
 
@@ -631,16 +667,20 @@ def main(argv: list[str] | None = None) -> int:
     if explain is None:
         print(json.dumps(curated, ensure_ascii=False, indent=2))
     else:
+        marks = {"残す": "○", "捨てる": "×", "捨てる→戻した": "△"}
         for section_id, judgements in explain.items():
             print(f"\n=== {section_id} ===", file=sys.stderr)
             for title, verdict in judgements:
-                mark = "○" if verdict == "残す" else ("×" if verdict == "捨てる" else "?")
-                print(f"  {mark} [{verdict}] {title[:60]}", file=sys.stderr)
-        kept = sum(1 for j in explain.values() for _, v in j if v == "残す")
-        dropped = sum(1 for j in explain.values() for _, v in j if v == "捨てる")
-        unknown = sum(1 for j in explain.values() for _, v in j if v not in ("残す", "捨てる"))
+                print(f"  {marks.get(verdict, '?')} [{verdict}] {title[:60]}", file=sys.stderr)
+        verdicts = [v for j in explain.values() for _, v in j]
+        kept = verdicts.count("残す")
+        dropped = verdicts.count("捨てる")
+        restored = verdicts.count("捨てる→戻した")
+        unknown = len(verdicts) - kept - dropped - restored
         print(f"\n判定: 残す {kept} / 捨てる {dropped} / 判定できず {unknown}", file=sys.stderr)
-        if dropped == 0:
+        if restored:
+            print(f"      うち {restored} 件は min_keep の安全弁で戻しました（△）", file=sys.stderr)
+        if dropped + restored == 0:
             print("[警告] 1 件も捨てていません。モデルが条件を読めていない可能性があります",
                   file=sys.stderr)
 
