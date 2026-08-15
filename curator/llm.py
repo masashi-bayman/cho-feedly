@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -88,6 +89,9 @@ class SectionRule:
     # individual: 1 件ずつ「残す/捨てる」を判定する（既定）
     # batch:      まとめて見せて番号を選ばせる
     mode: str = "individual"
+    # (見出し, 残すか) の正解例。fewshot 系の聞き方が使う。
+    # criteria という抽象的な指示より、こちらの方がはるかによく効く
+    examples: list[tuple[str, bool]] = field(default_factory=list)
 
     @property
     def selects(self) -> bool:
@@ -107,6 +111,25 @@ class CuratorConfig:
     # 1 件ずつ判定するときの聞き方。JUDGE_STYLES のキー。--selftest で選ぶ
     judge_style: str = "keep_true"
     rules: dict[str, SectionRule] = field(default_factory=dict)
+
+
+def _load_examples(raw: Any) -> list[tuple[str, bool]]:
+    """select.examples の keep / drop を (見出し, 残すか) の並びにする。
+
+    keep と drop を交互に並べる。同じ答えが続くと、小さいモデルは
+    中身を見ずにその答えを繰り返すようになるため。
+    """
+    if not isinstance(raw, dict):
+        return []
+    keep = [str(t) for t in (raw.get("keep") or []) if str(t).strip()]
+    drop = [str(t) for t in (raw.get("drop") or []) if str(t).strip()]
+    mixed: list[tuple[str, bool]] = []
+    for i in range(max(len(keep), len(drop))):
+        if i < len(keep):
+            mixed.append((keep[i], True))
+        if i < len(drop):
+            mixed.append((drop[i], False))
+    return mixed
 
 
 def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> CuratorConfig:
@@ -143,6 +166,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> CuratorConfig:
             criteria=str(select.get("criteria") or "").strip(),
             translate=bool(raw_rule.get("translate", False)),
             mode=str(select.get("mode") or "individual").strip().lower(),
+            examples=_load_examples(select.get("examples")),
         )
 
     return CuratorConfig(
@@ -324,12 +348,58 @@ def parse_judgement(text: str) -> bool | None:
 # ---------------------------------------------------------------------------
 # 聞き方の候補
 #
-# 1.5B クラスは「聞き方」で答えが丸ごと変わる。実測では現行の keep_true が
-# 70 件中 70 件を「いいえ」と答えた（＝見出しを読んでいない）。
-# どの聞き方なら読むのかは機種依存なので、--selftest で測って選ぶ。
-# 選んだものを curator.yaml の defaults.judge_style に書く。
+# 実測（qwen2.5:1.5b / 見出し 8 件）:
+#   keep_true         8 件すべて「捨てる」
+#   keep_false_first  8 件すべて「捨てる」（選択肢の順序は原因ではない）
+#   score             8 件すべて 5 点以上＝「残す」
+#
+# 同じモデル・同じ見出しで、聞き方を変えただけで答えが丸ごと裏返っている。
+# 読めていないのではなく、聞き方に引きずられて片側へ倒れている。
+#
+# 小さいモデルに「判断しろ」と抽象的に頼むのが無理なだけなので、
+# 正解例を並べてから聞く（fewshot）。どれが効くかは --selftest で測る。
 # ---------------------------------------------------------------------------
-def _prompt_keep_true(title: str, criteria: str) -> str:
+Example = tuple[str, bool]
+
+
+def _format_examples(examples: list[Example], yes: str, no: str) -> str:
+    return "".join(f"見出し: {t}\n答え: {yes if want else no}\n\n" for t, want in examples)
+
+
+def _prompt_fewshot(title: str, criteria: str, examples: list[Example]) -> str:
+    """正解例を見せてから同じ形式で答えさせる。
+
+    小さいモデルは「条件を読んで判断する」より「並んでいる形を続ける」方が
+    はるかに得意。例を 4〜6 件置くと、条件文だけのときと精度が変わる。
+    例が無ければただの yes_no と同じになる。
+    """
+    return (
+        "ニュースの見出しを仕分けます。\n"
+        f"次のようなものを読みたい: {criteria}\n"
+        "それ以外は読みたくない。\n\n"
+        f"{_format_examples(examples, 'はい', 'いいえ')}"
+        f"見出し: {title}\n答え:"
+    )
+
+
+def _prompt_fewshot_json(title: str, criteria: str, examples: list[Example]) -> str:
+    """fewshot と同じ内容を JSON で答えさせる。
+
+    fewshot が効いたのに JSON では効かないなら、format=json が原因だと分かる。
+    """
+    body = "".join(
+        f'見出し: {t}\n答え: {{"keep": {"true" if want else "false"}}}\n\n' for t, want in examples
+    )
+    return (
+        "ニュースの見出しを仕分けます。\n"
+        f"次のようなものを読みたい: {criteria}\n"
+        "それ以外は読みたくない。\n\n"
+        f"{body}"
+        f"見出し: {title}\n答え:"
+    )
+
+
+def _prompt_keep_true(title: str, criteria: str, examples: list[Example]) -> str:
     return (
         "次の見出しは、下の「読みたいもの」に当てはまりますか。\n\n"
         f"【読みたいもの】\n{criteria}\n"
@@ -339,7 +409,7 @@ def _prompt_keep_true(title: str, criteria: str) -> str:
     )
 
 
-def _prompt_keep_false_first(title: str, criteria: str) -> str:
+def _prompt_keep_false_first(title: str, criteria: str, examples: list[Example]) -> str:
     """keep_true と選択肢の順序だけを入れ替えたもの。
 
     これで答えが丸ごと反転するなら、モデルは見出しを読まずに
@@ -354,7 +424,7 @@ def _prompt_keep_false_first(title: str, criteria: str) -> str:
     )
 
 
-def _prompt_yes_no(title: str, criteria: str) -> str:
+def _prompt_yes_no(title: str, criteria: str, examples: list[Example]) -> str:
     """JSON をやめて 1 語で答えさせる。
 
     format=json は構文を強制する代わりに、小さいモデルほど中身を考えずに
@@ -369,7 +439,7 @@ def _prompt_yes_no(title: str, criteria: str) -> str:
     )
 
 
-def _prompt_score(title: str, criteria: str) -> str:
+def _prompt_score(title: str, criteria: str, examples: list[Example]) -> str:
     """二択ではなく点数にする。
 
     「はい/いいえ」に倒れる癖があっても、点数なら分布が出ることがある。
@@ -416,11 +486,19 @@ class JudgeStyle:
 
 
 JUDGE_STYLES: dict[str, JudgeStyle] = {
-    "keep_true": JudgeStyle("JSON の二択 (true を先に提示)", _prompt_keep_true, parse_judgement, True, 24),
-    "keep_false_first": JudgeStyle("JSON の二択 (false を先に提示)", _prompt_keep_false_first, parse_judgement, True, 24),
-    "yes_no": JudgeStyle("はい / いいえ の 1 語", _prompt_yes_no, parse_judgement, False, 8),
-    "score": JudgeStyle(f"0〜10 の点数 ({SCORE_THRESHOLD} 以上を残す)", _prompt_score, parse_score, True, 16),
+    # 本命。正解例を見せてから同じ形式で答えさせる
+    "fewshot": JudgeStyle("正解例を見せて はい/いいえ", _prompt_fewshot, parse_judgement, False, 8),
+    "fewshot_json": JudgeStyle("正解例を見せて JSON", _prompt_fewshot_json, parse_judgement, True, 24),
+    # 比較用。例を見せずに条件文だけで聞く
+    "yes_no": JudgeStyle("例なし・はい/いいえ", _prompt_yes_no, parse_judgement, False, 8),
+    "keep_true": JudgeStyle("例なし・JSON (true を先に提示)", _prompt_keep_true, parse_judgement, True, 24),
+    "keep_false_first": JudgeStyle("例なし・JSON (false を先に提示)", _prompt_keep_false_first, parse_judgement, True, 24),
+    "score": JudgeStyle(f"例なし・0〜10 の点数 ({SCORE_THRESHOLD} 以上を残す)", _prompt_score, parse_score, True, 16),
 }
+
+# --selftest で既定で試すもの。全部やると時間がかかるので、
+# 本命と、比べる意味のある対照だけに絞ってある
+SELFTEST_STYLES = ["fewshot", "fewshot_json", "yes_no"]
 
 
 def judge_style(name: str) -> JudgeStyle:
@@ -458,7 +536,9 @@ def select_one_by_one(
 
         try:
             answer = client.generate(
-                style.build(title, rule.criteria), style.json_mode, style.max_tokens
+                style.build(title, rule.criteria, rule.examples),
+                style.json_mode,
+                style.max_tokens,
             )
         except CuratorError as exc:
             LOG.warning("判定に失敗しました (%s)。この記事は残します", exc)
@@ -689,29 +769,99 @@ def _curate(
 # ---------------------------------------------------------------------------
 # 聞き方の採点
 #
-# 本番を 1 回回すと 15 分かかる。しかも答え合わせができないので、
-# 「モデルが見出しを読んでいるのか」が分からないまま設定をいじることになる。
+# 本番を 1 回回すと 15 分かかるうえ、答え合わせができない。
+# 「良くなったのか」が分からないまま設定をいじることになるので、
+# 答えの決まっている見出しで測れるようにする。
 #
-# ここでは答えの決まっている見出しを使う。全部同じ答えを返すモデルは
-# 必ず 50% 付近に落ちるので、読んでいないことがその場で分かる。
-# 見出しは実際の収集結果から採ってある。
+# 件数について:
+#   8 件では何も分からない。コイン投げでも 8 件中 5 件は 36% の確率で当たる。
+#   20 件にして、偶然にそうなる確率を毎回一緒に出す。
+#
+# 見出しについて:
+#   実際の収集結果から採ったものと、判定がぶれないよう補ったものが混じっている。
+#   境目のもの（盆栽の盗難は「社会の出来事」か？）はわざと入れていない。
+#   ここで測りたいのは「そもそも見分けられるのか」であって、
+#   境目をどちらに倒すかは criteria を書き換えて調整する話だから。
 # ---------------------------------------------------------------------------
 SELFTEST_CRITERIA = "政治、経済、災害、国際情勢、社会の大きな出来事。"
 
+# fewshot 系に見せる正解例。下の採点用の見出しとは重ねないこと
+# （見せた答えをそのまま返すだけでも満点になってしまう）
+SELFTEST_EXAMPLES: list[tuple[str, bool]] = [
+    ("日銀 政策金利の引き上げを決定 市場の反応は", True),
+    ("夏バテに効く簡単レシピ5選", False),
+    ("台風10号が九州に上陸 5万世帯が停電", True),
+    ("人気俳優の結婚が発表される", False),
+]
+
 SELFTEST_CASES: list[tuple[str, bool]] = [
+    # 残すべき ─ 政治・経済・災害・国際・社会の大きな出来事
     ("政府、半導体分野への追加投資を決定", True),
     ("千葉豪雨で冠水の国道アンダーパス 停電で排水できず 運転手重体", True),
     ("アフガニスタン タリバン復権から5年 人道状況の悪化懸念", True),
     ("米 7月の小売業の売上高 前月比0.6％減 FRB利上げ観測やや後退", True),
+    ("きょう終戦81年 全国戦没者追悼式に遺族ら 戦後生まれは過去最高", True),
+    ("熊本地震 被災の福祉施設へ介護職員派遣 人件費は公費負担に", True),
+    ("千葉県 明け方まで激しい雷雨恐れ", True),
+    ("エルニーニョ 非常に強くなる恐れ", True),
+    ("英国 右派政党の党首 辞職後の補欠選挙で再選も疑惑の調査続く", True),
+    ("内閣支持率が急落 与党内から解散論も", True),
+    # 捨てるべき ─ 生活の豆知識・グルメ・芸能・スポーツ・雑学
     ("スマホ水没・水ぬれ時 NGな行為", False),
-    ("バスローブで報道対応 県職員処分", False),
-    ("「いい盆栽ゲット」 海外SNS投稿に仰天「うちの！」 盗難頻発", False),
+    ("松屋の新メニューを実食レビュー 想像以上のボリューム", False),
+    ("今年の夏に読みたいおすすめ小説10選", False),
+    ("100均グッズで作る夏の収納アイデア", False),
     ("大リーグ村上宗隆選手が熊本支援のチャリティープロジェクト", False),
+    ("人気アイドルグループ 新メンバーの加入を発表", False),
+    ("プロ野球 阪神が3連勝 首位との差を2に縮める", False),
+    ("話題のスイーツ店に3時間の行列 SNSで火が付く", False),
+    ("猫が段ボールを好む理由を専門家が解説", False),
+    ("寝つきをよくする5つの習慣 専門医が解説", False),
 ]
 
 
-def run_selftest(config: CuratorConfig) -> int:
-    """すべての聞き方を同じ見出しで採点し、勝った聞き方を提案する。"""
+def coin_flip_probability(correct: int, total: int) -> float:
+    """当てずっぽうで correct 件以上あたる確率。
+
+    これを出さずに「5/8 だから一番」と言ってはいけない。
+    コイン投げでも 8 件中 5 件は 36% の確率で起きる。
+    """
+    ways = sum(math.comb(total, k) for k in range(correct, total + 1))
+    return ways / (2 ** total)
+
+
+@dataclass
+class StyleScore:
+    name: str
+    label: str
+    kept_right: int = 0     # 残すべきを残せた数
+    dropped_right: int = 0  # 捨てるべきを捨てられた数
+    said_keep: int = 0      # 「残す」と答えた数（正誤を問わない）
+    said_drop: int = 0      # 「捨てる」と答えた数（正誤を問わない）
+    unknown: int = 0        # 答えを読み取れなかった数
+    seconds: float = 0.0
+
+    @property
+    def correct(self) -> int:
+        return self.kept_right + self.dropped_right
+
+    @property
+    def discriminates(self) -> bool:
+        """両方の答えを実際に使い分けているか。
+
+        全部「残す」でも全部「捨てる」でも正解率は 50% 付近になる。
+        正解率だけ見ていると、何も判断していないものを見逃す。
+        実際 keep_true は 8/8「捨てる」、score は 8/8「残す」で、
+        どちらも 4/8 という「まとも」に見える数字を出していた。
+        """
+        return self.said_keep > 0 and self.said_drop > 0
+
+
+SELFTEST_HALF = sum(1 for _, want in SELFTEST_CASES if want)
+
+
+def run_selftest(config: CuratorConfig, style_names: list[str], verbose: bool) -> int:
+    """聞き方ごとに同じ見出しを採点する。勝敗は正解率と偶然の確率の両方で決める。"""
     client = OllamaClient(config)
     try:
         client.available_models()
@@ -719,68 +869,93 @@ def run_selftest(config: CuratorConfig) -> int:
         print(f"[NG] Ollama に繋がりません ({type(exc).__name__})", file=sys.stderr)
         return 1
 
-    expected_true = sum(1 for _, want in SELFTEST_CASES if want)
+    total = len(SELFTEST_CASES)
     print(f"モデル: {config.model}")
-    print(f"見出し {len(SELFTEST_CASES)} 件（残すべき {expected_true} / 捨てるべき "
-          f"{len(SELFTEST_CASES) - expected_true}）を、聞き方 {len(JUDGE_STYLES)} 通りで試します")
-    print("全部同じ答えしか返さない聞き方は「読んでいない」と表示されます\n")
+    print(f"見出し {total} 件（残すべき {SELFTEST_HALF} / 捨てるべき {total - SELFTEST_HALF}）を "
+          f"{len(style_names)} 通りの聞き方で採点します")
+    print(f"問い合わせ {total * len(style_names)} 回。1 件 10 秒として "
+          f"{total * len(style_names) * 10 // 60} 分ほどかかります\n")
 
-    results: list[tuple[str, int, bool, float]] = []
+    scores: list[StyleScore] = []
     try:
-        for name, style in JUDGE_STYLES.items():
+        for name in style_names:
+            style = judge_style(name)
             print(f"── {name}: {style.label}")
-            correct = 0
-            answers: list[bool | None] = []
+            score = StyleScore(name, style.label)
             started = time.monotonic()
             for title, want in SELFTEST_CASES:
                 try:
                     raw = client.generate(
-                        style.build(title, SELFTEST_CRITERIA), style.json_mode, style.max_tokens
+                        style.build(title, SELFTEST_CRITERIA, SELFTEST_EXAMPLES),
+                        style.json_mode,
+                        style.max_tokens,
                     )
                     got = style.parse(raw)
                 except CuratorError as exc:
                     print(f"   [NG] 問い合わせに失敗しました ({exc})")
                     got, raw = None, ""
-                answers.append(got)
-                if got == want:
-                    correct += 1
-                mark = "○" if got == want else "×"
-                shown = {True: "残す", False: "捨てる", None: f"不明({raw.strip()[:12]})"}[got]
-                print(f"   {mark} 期待 {'残す' if want else '捨てる'} / 実際 {shown}  {title[:34]}")
+                if got is None:
+                    score.unknown += 1
+                else:
+                    if got:
+                        score.said_keep += 1
+                    else:
+                        score.said_drop += 1
+                    if got == want:
+                        if want:
+                            score.kept_right += 1
+                        else:
+                            score.dropped_right += 1
+                if verbose:
+                    shown = {True: "残す", False: "捨てる", None: f"不明({raw.strip()[:12]})"}[got]
+                    mark = "○" if got == want else "×"
+                    print(f"   {mark} 期待 {'残す' if want else '捨てる'} / 実際 {shown}  {title[:32]}")
 
-            elapsed = time.monotonic() - started
-            decided = [a for a in answers if a is not None]
-            if not decided:
-                flat, note = True, "  ← 答えを 1 つも読み取れません"
-            elif len(set(decided)) == 1:
-                flat, note = True, "  ← 全部同じ答え。読んでいません"
+            score.seconds = time.monotonic() - started
+            scores.append(score)
+            print(f"   残すべき {SELFTEST_HALF} 件 → 残せた {score.kept_right}")
+            print(f"   捨てるべき {total - SELFTEST_HALF} 件 → 捨てられた {score.dropped_right}")
+            if score.unknown:
+                print(f"   答えを読み取れなかった {score.unknown} 件")
+            p = coin_flip_probability(score.correct, total)
+            if not score.discriminates:
+                verdict = "← 片方の答えしか返していません。判断していない"
+            elif p >= 0.05:
+                verdict = f"← 当てずっぽうと区別が付きません (偶然にこうなる確率 {p:.0%})"
             else:
-                flat, note = False, ""
-            print(f"   正解 {correct}/{len(SELFTEST_CASES)} "
-                  f"({elapsed / len(SELFTEST_CASES):.1f} 秒/件){note}\n")
-            results.append((name, correct, flat, elapsed))
+                verdict = f"← 見分けられています (偶然にこうなる確率 {p:.1%})"
+            print(f"   正解 {score.correct}/{total}  {score.seconds / total:.1f} 秒/件  {verdict}\n")
     finally:
         client.unload()
 
-    usable = [r for r in results if not r[2]]
-    print("=" * 60)
-    for name, correct, flat, elapsed in sorted(results, key=lambda r: -r[1]):
-        state = "使えない" if flat else "候補"
-        print(f"  {name:18} {correct}/{len(SELFTEST_CASES)}  "
-              f"{elapsed / len(SELFTEST_CASES):5.1f} 秒/件  {state}")
+    print("=" * 66)
+    for score in sorted(scores, key=lambda s: -s.correct):
+        p = coin_flip_probability(score.correct, total)
+        state = "判断していない" if not score.discriminates else (
+            "偶然と区別できない" if p >= 0.05 else "使える")
+        print(f"  {score.name:14} {score.correct:2}/{total}  "
+              f"{score.seconds / total:5.1f} 秒/件  {state}")
 
+    usable = [s for s in scores
+              if s.discriminates and coin_flip_probability(s.correct, total) < 0.05]
     if not usable:
-        print("\nどの聞き方でも見出しを読めていません。1.5B では無理だと思われます。")
-        print("curator.yaml のセクションを消して選別を止めるか、大きいモデルを試してください。")
+        print("\nどの聞き方も当てずっぽうと区別が付きませんでした。")
+        print("この見出しは人間なら迷わず分けられるものばかりなので、")
+        print(f"{config.model} にこの仕事は無理だという結論になります。")
+        print("\n次の手は 2 つです:")
+        print("  1. 大きいモデルを試す:  ollama pull qwen2.5:3b")
+        print("     そのうえで          python3 -m curator.llm --selftest --model qwen2.5:3b")
+        print("  2. LLM をやめる。curator.yaml の sections を消せば選別工程は素通しになる")
         return 1
 
-    best = max(usable, key=lambda r: r[1])
-    if best[1] <= len(SELFTEST_CASES) * 0.6:
-        print("\n一番ましなものでも当てずっぽうと大差ありません。選別を止めることを勧めます。")
-        return 1
-
-    print(f"\n{best[0]} が一番でした。curator.yaml の defaults にこれを足してください:")
-    print(f"\n  judge_style: {best[0]}\n")
+    best = max(usable, key=lambda s: (s.correct, -s.seconds))
+    print(f"\n{best.name} が使えます（{best.correct}/{total}、{best.seconds / total:.1f} 秒/件）。")
+    print("curator.yaml の defaults を書き換えてください:")
+    print(f"\n  judge_style: {best.name}\n")
+    if best.name.startswith("fewshot"):
+        print("この聞き方は各セクションの select.examples を使います。")
+        print("選別の精度は criteria より examples で決まるので、")
+        print("外した記事を見つけたら examples に足していくのが一番効きます。")
     return 0
 
 
@@ -796,6 +971,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="1 件ずつの採否を表示する（判定が効いているかの確認用）")
     parser.add_argument("--selftest", action="store_true",
                         help="答えの分かっている見出しで聞き方を採点する（digest 不要）")
+    parser.add_argument("--model", help="このモデルで動かす（curator.yaml より優先）")
+    parser.add_argument("--styles", help=f"--selftest で試す聞き方をカンマ区切りで指定 "
+                                         f"(既定: {','.join(SELFTEST_STYLES)} / "
+                                         f"すべて: {','.join(JUDGE_STYLES)})")
     parser.add_argument("-v", "--verbose", action="store_true", help="debug ログまで出す")
     args = parser.parse_args(argv)
 
@@ -806,6 +985,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     load_dotenv(args.env)
     config = load_config(args.config)
+    if args.model:
+        config.model = args.model.strip()
 
     if args.check:
         print(f"接続先: {config.base_url}")
@@ -833,7 +1014,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.selftest:
-        return run_selftest(config)
+        names = [n.strip() for n in (args.styles or "").split(",") if n.strip()] or SELFTEST_STYLES
+        unknown = [n for n in names if n not in JUDGE_STYLES]
+        if unknown:
+            parser.error(f"知らない聞き方です: {', '.join(unknown)}\n"
+                         f"使えるのは: {', '.join(JUDGE_STYLES)}")
+        return run_selftest(config, names, args.verbose)
 
     if not args.digest:
         parser.error("digest.json のパスを指定してください（--check 以外の場合）")
@@ -870,7 +1056,7 @@ def main(argv: list[str] | None = None) -> int:
                 style = judge_style(config.judge_style)
                 title = str(items[0].get("title", ""))
                 print(f"（1 件目の例。実際は {len(items)} 件に同じ形で聞きます）", file=sys.stderr)
-                print(style.build(title, rule.criteria), file=sys.stderr)
+                print(style.build(title, rule.criteria, rule.examples), file=sys.stderr)
         print("\n[dry-run] LLM は呼んでいません", file=sys.stderr)
         return 0
 
