@@ -141,6 +141,21 @@ class SectionRule:
     # (見出し, 残すか) の正解例。fewshot 系の聞き方が使う。
     # criteria という抽象的な指示より、こちらの方がはるかによく効く
     examples: list[tuple[str, bool]] = field(default_factory=list)
+    # category の聞き方が使う分野名。読みたい分野と、そうでない分野。
+    # 二択より選択肢が多い方が、片側に倒れにくい
+    keep_categories: list[str] = field(default_factory=list)
+    drop_categories: list[str] = field(default_factory=list)
+
+    @property
+    def categories(self) -> list[str]:
+        """モデルに見せる分野の一覧。読みたい方に偏らないよう交互に並べる。"""
+        mixed: list[str] = []
+        for i in range(max(len(self.keep_categories), len(self.drop_categories))):
+            if i < len(self.keep_categories):
+                mixed.append(self.keep_categories[i])
+            if i < len(self.drop_categories):
+                mixed.append(self.drop_categories[i])
+        return mixed
 
     @property
     def selects(self) -> bool:
@@ -181,6 +196,12 @@ def _load_examples(raw: Any) -> list[tuple[str, bool]]:
     return mixed
 
 
+def _string_list(raw: Any) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    return [str(x).strip() for x in raw if str(x).strip()]
+
+
 def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> CuratorConfig:
     """curator.yaml を読む。読めなければ既定値だけの設定を返す（選別は行われない）。"""
     raw: dict[str, Any] = {}
@@ -216,6 +237,8 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> CuratorConfig:
             translate=bool(raw_rule.get("translate", False)),
             mode=str(select.get("mode") or "individual").strip().lower(),
             examples=_load_examples(select.get("examples")),
+            keep_categories=_string_list((select.get("categories") or {}).get("keep")),
+            drop_categories=_string_list((select.get("categories") or {}).get("drop")),
         )
 
     return CuratorConfig(
@@ -375,8 +398,10 @@ def parse_selection(text: str, count: int, keep: int) -> list[int] | None:
     return picked
 
 
-TRUE_WORDS = ("true", "yes", "はい", "残す", "1")
-FALSE_WORDS = ("false", "no", "いいえ", "捨てる", "0")
+# 英語の聞き方で使う keep / discard もここに入れる。
+# "discard" は "keep" を含まず、"keep" は "no" を含まないので取り違えない
+TRUE_WORDS = ("true", "yes", "はい", "残す", "keep", "1")
+FALSE_WORDS = ("false", "no", "いいえ", "捨てる", "discard", "drop", "0")
 
 
 def parse_judgement(text: str) -> bool | None:
@@ -429,50 +454,122 @@ def _format_examples(examples: list[Example], yes: str, no: str) -> str:
     return "".join(f"見出し: {t}\n答え: {yes if want else no}\n\n" for t, want in examples)
 
 
-def _prompt_fewshot(title: str, criteria: str, examples: list[Example]) -> str:
+def _prompt_fewshot(title: str, rule: SectionRule) -> str:
     """正解例を見せてから同じ形式で答えさせる。
 
     小さいモデルは「条件を読んで判断する」より「並んでいる形を続ける」方が
-    はるかに得意。例を 4〜6 件置くと、条件文だけのときと精度が変わる。
-    例が無ければただの yes_no と同じになる。
+    はるかに得意。例が無ければただの yes_no と同じになる。
     """
     return (
         "ニュースの見出しを仕分けます。\n"
-        f"次のようなものを読みたい: {criteria}\n"
+        f"次のようなものを読みたい: {rule.criteria}\n"
         "それ以外は読みたくない。\n\n"
-        f"{_format_examples(examples, 'はい', 'いいえ')}"
+        f"{_format_examples(rule.examples, 'はい', 'いいえ')}"
         f"見出し: {title}\n答え:"
     )
 
 
-def _prompt_fewshot_json(title: str, criteria: str, examples: list[Example]) -> str:
+def _prompt_fewshot_json(title: str, rule: SectionRule) -> str:
     """fewshot と同じ内容を JSON で答えさせる。
 
     fewshot が効いたのに JSON では効かないなら、format=json が原因だと分かる。
     """
     body = "".join(
-        f'見出し: {t}\n答え: {{"keep": {"true" if want else "false"}}}\n\n' for t, want in examples
+        f'見出し: {t}\n答え: {{"keep": {"true" if want else "false"}}}\n\n'
+        for t, want in rule.examples
     )
     return (
         "ニュースの見出しを仕分けます。\n"
-        f"次のようなものを読みたい: {criteria}\n"
+        f"次のようなものを読みたい: {rule.criteria}\n"
         "それ以外は読みたくない。\n\n"
         f"{body}"
         f"見出し: {title}\n答え:"
     )
 
 
-def _prompt_keep_true(title: str, criteria: str, examples: list[Example]) -> str:
+# ---------------------------------------------------------------------------
+# 英語で指示する聞き方
+#
+# 小型モデルは英語の指示追従が日本語よりはるかに強い。学習データの量が
+# 桁違いに違うため。見出しは日本語のまま、指示だけ英語にすると、
+# 同じモデルでも結果が変わることがある。
+# 日本語で全滅したら、モデルを替える前にこちらを試す価値がある。
+# ---------------------------------------------------------------------------
+def _prompt_english(title: str, rule: SectionRule) -> str:
+    return (
+        "You are filtering Japanese news headlines for a reader.\n"
+        f"The reader wants: {rule.criteria}\n"
+        "Everything else should be discarded.\n\n"
+        f"Headline: {title}\n"
+        'Answer with one word, "keep" or "discard".\nAnswer:'
+    )
+
+
+def _prompt_english_fewshot(title: str, rule: SectionRule) -> str:
+    body = "".join(
+        f"Headline: {t}\nAnswer: {'keep' if want else 'discard'}\n\n"
+        for t, want in rule.examples
+    )
+    return (
+        "You are filtering Japanese news headlines for a reader.\n"
+        f"The reader wants: {rule.criteria}\n"
+        "Everything else should be discarded.\n"
+        'Answer each headline with one word, "keep" or "discard".\n\n'
+        f"{body}"
+        f"Headline: {title}\nAnswer:"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 分野を選ばせる聞き方
+#
+# 二択は片側に倒れやすい。実測では 20 件すべて同じ答えになった。
+# 「どの分野か」を選ばせれば、答えの候補が増えて倒れにくくなるうえ、
+# 見出しを読まないと選べない。読んでいるかどうかの見極めにもなる。
+# ---------------------------------------------------------------------------
+def _prompt_category(title: str, rule: SectionRule) -> str:
+    labels = rule.categories or ["その他"]
+    return (
+        "次の見出しはどの分野ですか。下から 1 つだけ選んでください。\n\n"
+        f"分野: {' / '.join(labels)}\n\n"
+        f"見出し: {title}\n"
+        "分野名だけを答えてください。説明は書かないでください。\n分野:"
+    )
+
+
+def _parse_category(text: str, rule: SectionRule) -> bool | None:
+    """答えた分野が「読みたい方」に入っていれば残す。
+
+    どちらにも無い言葉を返してきたら不明扱い。不明は捨てないので、
+    分野名を思いつきで作られても記事が消えることはない。
+    """
+    answer = normalize_label(text)
+    if not answer:
+        return None
+    for label in rule.keep_categories:
+        if normalize_label(label) and normalize_label(label) in answer:
+            return True
+    for label in rule.drop_categories:
+        if normalize_label(label) and normalize_label(label) in answer:
+            return False
+    return None
+
+
+def normalize_label(text: str) -> str:
+    return unicodedata.normalize("NFKC", text).strip().lower()
+
+
+def _prompt_keep_true(title: str, rule: SectionRule) -> str:
     return (
         "次の見出しは、下の「読みたいもの」に当てはまりますか。\n\n"
-        f"【読みたいもの】\n{criteria}\n"
+        f"【読みたいもの】\n{rule.criteria}\n"
         f"【見出し】\n{title}\n\n"
         '当てはまるなら {"keep": true}、当てはまらないなら {"keep": false} '
         "と答えてください。\n迷ったら true にしてください。説明は書かないでください。"
     )
 
 
-def _prompt_keep_false_first(title: str, criteria: str, examples: list[Example]) -> str:
+def _prompt_keep_false_first(title: str, rule: SectionRule) -> str:
     """keep_true と選択肢の順序だけを入れ替えたもの。
 
     これで答えが丸ごと反転するなら、モデルは見出しを読まずに
@@ -480,37 +577,33 @@ def _prompt_keep_false_first(title: str, criteria: str, examples: list[Example])
     """
     return (
         "次の見出しは、下の「読みたいもの」に当てはまりますか。\n\n"
-        f"【読みたいもの】\n{criteria}\n"
+        f"【読みたいもの】\n{rule.criteria}\n"
         f"【見出し】\n{title}\n\n"
         '当てはまらないなら {"keep": false}、当てはまるなら {"keep": true} '
         "と答えてください。\n迷ったら true にしてください。説明は書かないでください。"
     )
 
 
-def _prompt_yes_no(title: str, criteria: str, examples: list[Example]) -> str:
+def _prompt_yes_no(title: str, rule: SectionRule) -> str:
     """JSON をやめて 1 語で答えさせる。
 
     format=json は構文を強制する代わりに、小さいモデルほど中身を考えずに
-    「JSON らしい何か」を出して終わりにしてしまう。素の 1 語なら
-    普通の文章生成に近くなる。
+    「JSON らしい何か」を出して終わりにしてしまう。
     """
     return (
-        f"{criteria}\n"
+        f"{rule.criteria}\n"
         "――この条件に当てはまるニュースだけを選んでいます。\n\n"
         f"見出し: {title}\n\n"
         "この見出しは条件に当てはまりますか。「はい」か「いいえ」だけ答えてください。"
     )
 
 
-def _prompt_score(title: str, criteria: str, examples: list[Example]) -> str:
-    """二択ではなく点数にする。
-
-    「はい/いいえ」に倒れる癖があっても、点数なら分布が出ることがある。
-    """
+def _prompt_score(title: str, rule: SectionRule) -> str:
+    """二択ではなく点数にする。"""
     return (
         "次の見出しが、下の【関心】にどれくらい近いか 0〜10 で採点してください。\n"
         "10 がぴったり、0 が全く無関係です。\n\n"
-        f"【関心】\n{criteria}\n"
+        f"【関心】\n{rule.criteria}\n"
         f"【見出し】\n{title}\n\n"
         '{"score": 7} の形の JSON だけを答えてください。説明は書かないでください。'
     )
@@ -519,7 +612,7 @@ def _prompt_score(title: str, criteria: str, examples: list[Example]) -> str:
 SCORE_THRESHOLD = 5
 
 
-def parse_score(text: str) -> bool | None:
+def parse_score(text: str, rule: SectionRule) -> bool | None:
     """点数を読んで、しきい値以上なら残す。読めなければ None。"""
     value: Any = None
     try:
@@ -539,30 +632,40 @@ def parse_score(text: str) -> bool | None:
         return None
 
 
+def _parse_yes_no(text: str, rule: SectionRule) -> bool | None:
+    return parse_judgement(text)
+
+
 @dataclass(frozen=True)
 class JudgeStyle:
     label: str
-    build: Any          # (title, criteria) -> prompt
-    parse: Any          # (text) -> bool | None
+    build: Any          # (title, rule) -> prompt
+    parse: Any          # (text, rule) -> bool | None
     json_mode: bool
     max_tokens: int
 
 
 JUDGE_STYLES: dict[str, JudgeStyle] = {
-    # 本命。正解例を見せてから同じ形式で答えさせる
-    "fewshot": JudgeStyle("正解例を見せて はい/いいえ", _prompt_fewshot, parse_judgement, False, 8),
-    "fewshot_json": JudgeStyle("正解例を見せて JSON", _prompt_fewshot_json, parse_judgement, True, 24),
-    # 比較用。例を見せずに条件文だけで聞く
-    "yes_no": JudgeStyle("例なし・はい/いいえ", _prompt_yes_no, parse_judgement, False, 8),
-    "keep_true": JudgeStyle("例なし・JSON (true を先に提示)", _prompt_keep_true, parse_judgement, True, 24),
-    "keep_false_first": JudgeStyle("例なし・JSON (false を先に提示)", _prompt_keep_false_first, parse_judgement, True, 24),
+    # 日本語で例を見せる
+    "fewshot": JudgeStyle("例あり・はい/いいえ", _prompt_fewshot, _parse_yes_no, False, 8),
+    "fewshot_json": JudgeStyle("例あり・JSON", _prompt_fewshot_json, _parse_yes_no, True, 24),
+    # 英語で指示する。小型モデルは英語の指示の方が通りやすい
+    "english": JudgeStyle("英語の指示・例なし", _prompt_english, _parse_yes_no, False, 8),
+    "english_fewshot": JudgeStyle("英語の指示・例あり", _prompt_english_fewshot, _parse_yes_no, False, 8),
+    # 二択をやめる
+    "category": JudgeStyle("分野を選ばせる", _prompt_category, _parse_category, False, 12),
+    # 比較用。例も無く条件文だけで聞く
+    "yes_no": JudgeStyle("例なし・はい/いいえ", _prompt_yes_no, _parse_yes_no, False, 8),
+    "keep_true": JudgeStyle("例なし・JSON (true が先)", _prompt_keep_true, _parse_yes_no, True, 24),
+    "keep_false_first": JudgeStyle("例なし・JSON (false が先)", _prompt_keep_false_first, _parse_yes_no, True, 24),
     "score": JudgeStyle(f"例なし・0〜10 の点数 ({SCORE_THRESHOLD} 以上を残す)", _prompt_score, parse_score, True, 16),
 }
 
 # --selftest で既定で試すもの。全部やると時間がかかるので、
-# 本命と、比べる意味のある対照だけに絞ってある
-SELFTEST_STYLES = ["fewshot", "fewshot_json", "yes_no"]
-
+# まだ試していない筋の良いものと、比べる意味のある対照だけに絞ってある。
+# 日本語の二択（keep_true / score）は 20 件すべて同じ答えを返すことが
+# 実測で分かっているので既定からは外した（--styles で指定はできる）
+SELFTEST_STYLES = ["english_fewshot", "english", "category", "fewshot"]
 
 def judge_style(name: str) -> JudgeStyle:
     style = JUDGE_STYLES.get(name)
@@ -599,9 +702,7 @@ def select_one_by_one(
 
         try:
             answer = client.generate(
-                style.build(title, rule.criteria, rule.examples),
-                style.json_mode,
-                style.max_tokens,
+                style.build(title, rule), style.json_mode, style.max_tokens
             )
         except CuratorError as exc:
             LOG.warning("判定に失敗しました (%s)。この記事は残します", exc)
@@ -610,7 +711,7 @@ def select_one_by_one(
                 explain.append((title, "エラー→残す"))
             continue
 
-        verdict = style.parse(answer)
+        verdict = style.parse(answer, rule)
         if verdict is None:
             undecided.append(item)
             if explain is not None:
@@ -865,6 +966,21 @@ SELFTEST_EXAMPLES: list[tuple[str, bool]] = [
     ("人気俳優の結婚が発表される", False),
 ]
 
+# category の聞き方が使う分野名
+SELFTEST_KEEP_CATEGORIES = ["政治", "経済", "災害", "国際", "事件事故"]
+SELFTEST_DROP_CATEGORIES = ["生活", "グルメ", "芸能", "スポーツ", "雑学"]
+
+
+def selftest_rule() -> SectionRule:
+    """採点で使う条件。本番の SectionRule と同じ形なので聞き方をそのまま試せる。"""
+    return SectionRule(
+        keep=len(SELFTEST_CASES),
+        criteria=SELFTEST_CRITERIA,
+        examples=SELFTEST_EXAMPLES,
+        keep_categories=SELFTEST_KEEP_CATEGORIES,
+        drop_categories=SELFTEST_DROP_CATEGORIES,
+    )
+
 SELFTEST_CASES: list[tuple[str, bool]] = [
     # 残すべき ─ 政治・経済・災害・国際・社会の大きな出来事
     ("政府、半導体分野への追加投資を決定", True),
@@ -957,6 +1073,7 @@ def run_selftest(config: CuratorConfig, style_names: list[str], verbose: bool) -
     print(f"問い合わせ {total * len(style_names)} 回。1 件 10 秒として "
           f"{total * len(style_names) * 10 // 60} 分ほどかかります\n")
 
+    rule = selftest_rule()
     scores: list[StyleScore] = []
     try:
         for name in style_names:
@@ -967,11 +1084,9 @@ def run_selftest(config: CuratorConfig, style_names: list[str], verbose: bool) -
             for title, want in SELFTEST_CASES:
                 try:
                     raw = client.generate(
-                        style.build(title, SELFTEST_CRITERIA, SELFTEST_EXAMPLES),
-                        style.json_mode,
-                        style.max_tokens,
+                        style.build(title, rule), style.json_mode, style.max_tokens
                     )
-                    got = style.parse(raw)
+                    got = style.parse(raw, rule)
                 except CuratorError as exc:
                     print(f"   [NG] 問い合わせに失敗しました ({exc})")
                     got, raw = None, ""
@@ -1148,7 +1263,7 @@ def main(argv: list[str] | None = None) -> int:
                 style = judge_style(config.judge_style)
                 title = str(items[0].get("title", ""))
                 print(f"（1 件目の例。実際は {len(items)} 件に同じ形で聞きます）", file=sys.stderr)
-                print(style.build(title, rule.criteria, rule.examples), file=sys.stderr)
+                print(style.build(title, rule), file=sys.stderr)
         print("\n[dry-run] LLM は呼んでいません", file=sys.stderr)
         return 0
 
