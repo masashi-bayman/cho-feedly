@@ -22,6 +22,15 @@ defaults:
   temperature: 0      # 毎朝同じ入力なら同じ結果が出るように
   keep_alive: 5m      # 処理中モデルをメモリに保持する時間。処理後は明示的に解放する
 
+  # 1 件ずつ判定するときの聞き方。小さいモデルはこれで答えが丸ごと変わる。
+  #     python3 -m curator.llm --selftest
+  # で答えの分かっている見出しを使って採点できる。勝ったものをここに書く。
+  #   keep_true        {"keep": true/false}（true を先に提示）
+  #   keep_false_first 同上。順序だけ逆。答えが反転するなら読んでいない証拠
+  #   yes_no           JSON をやめて「はい」「いいえ」の 1 語
+  #   score            0〜10 の点数。5 以上を残す
+  judge_style: keep_true
+
 # criteria には「読みたいもの」だけを短く書くこと。
 #
 # 「捨てる: ...」を併記してはいけない。1 件ずつ二択で聞く方式では、

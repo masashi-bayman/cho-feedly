@@ -62,6 +62,7 @@ FALLBACK_DEFAULTS: dict[str, Any] = {
     "num_ctx": 4096,
     "temperature": 0,
     "keep_alive": "5m",
+    "judge_style": "keep_true",
 }
 
 # 日本語（ひらがな・カタカナ・漢字）が含まれるか。和訳の要否判定に使う
@@ -103,6 +104,8 @@ class CuratorConfig:
     num_ctx: int
     temperature: float
     keep_alive: str
+    # 1 件ずつ判定するときの聞き方。JUDGE_STYLES のキー。--selftest で選ぶ
+    judge_style: str = "keep_true"
     rules: dict[str, SectionRule] = field(default_factory=dict)
 
 
@@ -151,6 +154,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> CuratorConfig:
         num_ctx=int(values["num_ctx"]),
         temperature=float(values["temperature"]),
         keep_alive=str(values["keep_alive"]),
+        judge_style=str(values["judge_style"]).strip(),
         rules=rules,
     )
 
@@ -284,16 +288,6 @@ def parse_selection(text: str, count: int, keep: int) -> list[int] | None:
     return picked
 
 
-def build_judge_prompt(title: str, criteria: str) -> str:
-    return (
-        "次の見出しは、下の「読みたいもの」に当てはまりますか。\n\n"
-        f"【読みたいもの】\n{criteria}\n"
-        f"【見出し】\n{title}\n\n"
-        '当てはまるなら {"keep": true}、当てはまらないなら {"keep": false} '
-        "と答えてください。\n迷ったら true にしてください。説明は書かないでください。"
-    )
-
-
 TRUE_WORDS = ("true", "yes", "はい", "残す", "1")
 FALSE_WORDS = ("false", "no", "いいえ", "捨てる", "0")
 
@@ -327,12 +321,123 @@ def parse_judgement(text: str) -> bool | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# 聞き方の候補
+#
+# 1.5B クラスは「聞き方」で答えが丸ごと変わる。実測では現行の keep_true が
+# 70 件中 70 件を「いいえ」と答えた（＝見出しを読んでいない）。
+# どの聞き方なら読むのかは機種依存なので、--selftest で測って選ぶ。
+# 選んだものを curator.yaml の defaults.judge_style に書く。
+# ---------------------------------------------------------------------------
+def _prompt_keep_true(title: str, criteria: str) -> str:
+    return (
+        "次の見出しは、下の「読みたいもの」に当てはまりますか。\n\n"
+        f"【読みたいもの】\n{criteria}\n"
+        f"【見出し】\n{title}\n\n"
+        '当てはまるなら {"keep": true}、当てはまらないなら {"keep": false} '
+        "と答えてください。\n迷ったら true にしてください。説明は書かないでください。"
+    )
+
+
+def _prompt_keep_false_first(title: str, criteria: str) -> str:
+    """keep_true と選択肢の順序だけを入れ替えたもの。
+
+    これで答えが丸ごと反転するなら、モデルは見出しを読まずに
+    「最後に書いてあった方」を返しているということ。位置バイアスの検出用。
+    """
+    return (
+        "次の見出しは、下の「読みたいもの」に当てはまりますか。\n\n"
+        f"【読みたいもの】\n{criteria}\n"
+        f"【見出し】\n{title}\n\n"
+        '当てはまらないなら {"keep": false}、当てはまるなら {"keep": true} '
+        "と答えてください。\n迷ったら true にしてください。説明は書かないでください。"
+    )
+
+
+def _prompt_yes_no(title: str, criteria: str) -> str:
+    """JSON をやめて 1 語で答えさせる。
+
+    format=json は構文を強制する代わりに、小さいモデルほど中身を考えずに
+    「JSON らしい何か」を出して終わりにしてしまう。素の 1 語なら
+    普通の文章生成に近くなる。
+    """
+    return (
+        f"{criteria}\n"
+        "――この条件に当てはまるニュースだけを選んでいます。\n\n"
+        f"見出し: {title}\n\n"
+        "この見出しは条件に当てはまりますか。「はい」か「いいえ」だけ答えてください。"
+    )
+
+
+def _prompt_score(title: str, criteria: str) -> str:
+    """二択ではなく点数にする。
+
+    「はい/いいえ」に倒れる癖があっても、点数なら分布が出ることがある。
+    """
+    return (
+        "次の見出しが、下の【関心】にどれくらい近いか 0〜10 で採点してください。\n"
+        "10 がぴったり、0 が全く無関係です。\n\n"
+        f"【関心】\n{criteria}\n"
+        f"【見出し】\n{title}\n\n"
+        '{"score": 7} の形の JSON だけを答えてください。説明は書かないでください。'
+    )
+
+
+SCORE_THRESHOLD = 5
+
+
+def parse_score(text: str) -> bool | None:
+    """点数を読んで、しきい値以上なら残す。読めなければ None。"""
+    value: Any = None
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            value = parsed.get("score")
+    except (ValueError, TypeError):
+        pass
+    if value is None:
+        found = INTEGER_RE.search(text)
+        value = found.group() if found else None
+    if value is None:
+        return None
+    try:
+        return float(value) >= SCORE_THRESHOLD
+    except (TypeError, ValueError):
+        return None
+
+
+@dataclass(frozen=True)
+class JudgeStyle:
+    label: str
+    build: Any          # (title, criteria) -> prompt
+    parse: Any          # (text) -> bool | None
+    json_mode: bool
+    max_tokens: int
+
+
+JUDGE_STYLES: dict[str, JudgeStyle] = {
+    "keep_true": JudgeStyle("JSON の二択 (true を先に提示)", _prompt_keep_true, parse_judgement, True, 24),
+    "keep_false_first": JudgeStyle("JSON の二択 (false を先に提示)", _prompt_keep_false_first, parse_judgement, True, 24),
+    "yes_no": JudgeStyle("はい / いいえ の 1 語", _prompt_yes_no, parse_judgement, False, 8),
+    "score": JudgeStyle(f"0〜10 の点数 ({SCORE_THRESHOLD} 以上を残す)", _prompt_score, parse_score, True, 16),
+}
+
+
+def judge_style(name: str) -> JudgeStyle:
+    style = JUDGE_STYLES.get(name)
+    if style is None:
+        LOG.warning("judge_style '%s' は知らない聞き方です。keep_true を使います", name)
+        return JUDGE_STYLES["keep_true"]
+    return style
+
+
 def select_one_by_one(
     client: OllamaClient,
     items: list[dict[str, Any]],
     rule: SectionRule,
     deadline: float,
     explain: list[tuple[str, str]] | None = None,
+    style: JudgeStyle | None = None,
 ) -> list[dict[str, Any]]:
     """1 件ずつ「残す/捨てる」を判定する。
 
@@ -342,6 +447,7 @@ def select_one_by_one(
     """
     kept: list[dict[str, Any]] = []
     undecided: list[dict[str, Any]] = []
+    style = style or JUDGE_STYLES["keep_true"]
 
     for item in items:
         title = str(item.get("title", ""))
@@ -351,7 +457,9 @@ def select_one_by_one(
             break
 
         try:
-            answer = client.generate(build_judge_prompt(title, rule.criteria), True, 24)
+            answer = client.generate(
+                style.build(title, rule.criteria), style.json_mode, style.max_tokens
+            )
         except CuratorError as exc:
             LOG.warning("判定に失敗しました (%s)。この記事は残します", exc)
             undecided.append(item)
@@ -359,7 +467,7 @@ def select_one_by_one(
                 explain.append((title, "エラー→残す"))
             continue
 
-        verdict = parse_judgement(answer)
+        verdict = style.parse(answer)
         if verdict is None:
             undecided.append(item)
             if explain is not None:
@@ -541,7 +649,9 @@ def _curate(
         return sections
 
     deadline = time.monotonic() + config.total_budget
-    LOG.info("選別を開始します (%s / %s)", config.base_url, config.model)
+    style = judge_style(config.judge_style)
+    LOG.info("選別を開始します (%s / %s / 聞き方 %s)",
+             config.base_url, config.model, config.judge_style)
 
     started = time.monotonic()
     try:
@@ -558,7 +668,7 @@ def _curate(
                     items = select_items(client, items, rule, config.chunk_size, deadline)
                 else:
                     log = [] if explain is not None else None
-                    items = select_one_by_one(client, items, rule, deadline, log)
+                    items = select_one_by_one(client, items, rule, deadline, log, style)
                     if explain is not None and log is not None:
                         explain[str(section.get("id"))] = log
             if rule.translate:
@@ -577,6 +687,104 @@ def _curate(
 
 
 # ---------------------------------------------------------------------------
+# 聞き方の採点
+#
+# 本番を 1 回回すと 15 分かかる。しかも答え合わせができないので、
+# 「モデルが見出しを読んでいるのか」が分からないまま設定をいじることになる。
+#
+# ここでは答えの決まっている見出しを使う。全部同じ答えを返すモデルは
+# 必ず 50% 付近に落ちるので、読んでいないことがその場で分かる。
+# 見出しは実際の収集結果から採ってある。
+# ---------------------------------------------------------------------------
+SELFTEST_CRITERIA = "政治、経済、災害、国際情勢、社会の大きな出来事。"
+
+SELFTEST_CASES: list[tuple[str, bool]] = [
+    ("政府、半導体分野への追加投資を決定", True),
+    ("千葉豪雨で冠水の国道アンダーパス 停電で排水できず 運転手重体", True),
+    ("アフガニスタン タリバン復権から5年 人道状況の悪化懸念", True),
+    ("米 7月の小売業の売上高 前月比0.6％減 FRB利上げ観測やや後退", True),
+    ("スマホ水没・水ぬれ時 NGな行為", False),
+    ("バスローブで報道対応 県職員処分", False),
+    ("「いい盆栽ゲット」 海外SNS投稿に仰天「うちの！」 盗難頻発", False),
+    ("大リーグ村上宗隆選手が熊本支援のチャリティープロジェクト", False),
+]
+
+
+def run_selftest(config: CuratorConfig) -> int:
+    """すべての聞き方を同じ見出しで採点し、勝った聞き方を提案する。"""
+    client = OllamaClient(config)
+    try:
+        client.available_models()
+    except Exception as exc:
+        print(f"[NG] Ollama に繋がりません ({type(exc).__name__})", file=sys.stderr)
+        return 1
+
+    expected_true = sum(1 for _, want in SELFTEST_CASES if want)
+    print(f"モデル: {config.model}")
+    print(f"見出し {len(SELFTEST_CASES)} 件（残すべき {expected_true} / 捨てるべき "
+          f"{len(SELFTEST_CASES) - expected_true}）を、聞き方 {len(JUDGE_STYLES)} 通りで試します")
+    print("全部同じ答えしか返さない聞き方は「読んでいない」と表示されます\n")
+
+    results: list[tuple[str, int, bool, float]] = []
+    try:
+        for name, style in JUDGE_STYLES.items():
+            print(f"── {name}: {style.label}")
+            correct = 0
+            answers: list[bool | None] = []
+            started = time.monotonic()
+            for title, want in SELFTEST_CASES:
+                try:
+                    raw = client.generate(
+                        style.build(title, SELFTEST_CRITERIA), style.json_mode, style.max_tokens
+                    )
+                    got = style.parse(raw)
+                except CuratorError as exc:
+                    print(f"   [NG] 問い合わせに失敗しました ({exc})")
+                    got, raw = None, ""
+                answers.append(got)
+                if got == want:
+                    correct += 1
+                mark = "○" if got == want else "×"
+                shown = {True: "残す", False: "捨てる", None: f"不明({raw.strip()[:12]})"}[got]
+                print(f"   {mark} 期待 {'残す' if want else '捨てる'} / 実際 {shown}  {title[:34]}")
+
+            elapsed = time.monotonic() - started
+            decided = [a for a in answers if a is not None]
+            if not decided:
+                flat, note = True, "  ← 答えを 1 つも読み取れません"
+            elif len(set(decided)) == 1:
+                flat, note = True, "  ← 全部同じ答え。読んでいません"
+            else:
+                flat, note = False, ""
+            print(f"   正解 {correct}/{len(SELFTEST_CASES)} "
+                  f"({elapsed / len(SELFTEST_CASES):.1f} 秒/件){note}\n")
+            results.append((name, correct, flat, elapsed))
+    finally:
+        client.unload()
+
+    usable = [r for r in results if not r[2]]
+    print("=" * 60)
+    for name, correct, flat, elapsed in sorted(results, key=lambda r: -r[1]):
+        state = "使えない" if flat else "候補"
+        print(f"  {name:18} {correct}/{len(SELFTEST_CASES)}  "
+              f"{elapsed / len(SELFTEST_CASES):5.1f} 秒/件  {state}")
+
+    if not usable:
+        print("\nどの聞き方でも見出しを読めていません。1.5B では無理だと思われます。")
+        print("curator.yaml のセクションを消して選別を止めるか、大きいモデルを試してください。")
+        return 1
+
+    best = max(usable, key=lambda r: r[1])
+    if best[1] <= len(SELFTEST_CASES) * 0.6:
+        print("\n一番ましなものでも当てずっぽうと大差ありません。選別を止めることを勧めます。")
+        return 1
+
+    print(f"\n{best[0]} が一番でした。curator.yaml の defaults にこれを足してください:")
+    print(f"\n  judge_style: {best[0]}\n")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="ローカル LLM で digest を選別します")
     parser.add_argument("digest", nargs="?", help="digest.json のパス")
@@ -586,6 +794,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="LLM を呼ばず、送る内容を表示する")
     parser.add_argument("--explain", action="store_true",
                         help="1 件ずつの採否を表示する（判定が効いているかの確認用）")
+    parser.add_argument("--selftest", action="store_true",
+                        help="答えの分かっている見出しで聞き方を採点する（digest 不要）")
     parser.add_argument("-v", "--verbose", action="store_true", help="debug ログまで出す")
     args = parser.parse_args(argv)
 
@@ -622,6 +832,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"     選別対象のセクション: {', '.join(config.rules) or 'なし'}")
         return 0
 
+    if args.selftest:
+        return run_selftest(config)
+
     if not args.digest:
         parser.error("digest.json のパスを指定してください（--check 以外の場合）")
 
@@ -645,7 +858,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"[{section.get('id')}] {len(items)} 件 — 選別しません", file=sys.stderr)
                 continue
             print(f"\n[{section.get('id')}] {len(items)} 件 → 最大 {rule.keep} 件 "
-                  f"(下限 {rule.min_keep} 件 / 方式 {rule.mode} / "
+                  f"(下限 {rule.min_keep} 件 / 方式 {rule.mode} / 聞き方 {config.judge_style} / "
                   f"和訳: {'あり' if rule.translate else 'なし'})", file=sys.stderr)
             if not rule.selects:
                 continue
@@ -654,9 +867,10 @@ def main(argv: list[str] | None = None) -> int:
                 titles = [str(i.get("title", "")) for i in items[: config.chunk_size]]
                 print(build_select_prompt(titles, rule.keep, rule.criteria), file=sys.stderr)
             else:
+                style = judge_style(config.judge_style)
                 title = str(items[0].get("title", ""))
                 print(f"（1 件目の例。実際は {len(items)} 件に同じ形で聞きます）", file=sys.stderr)
-                print(build_judge_prompt(title, rule.criteria), file=sys.stderr)
+                print(style.build(title, rule.criteria), file=sys.stderr)
         print("\n[dry-run] LLM は呼んでいません", file=sys.stderr)
         return 0
 
