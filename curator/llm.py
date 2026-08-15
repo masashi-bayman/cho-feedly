@@ -81,6 +81,9 @@ class SectionRule:
     keep: int = 0
     criteria: str = ""
     translate: bool = False
+    # individual: 1 件ずつ「残す/捨てる」を判定する（既定）
+    # batch:      まとめて見せて番号を選ばせる
+    mode: str = "individual"
 
     @property
     def selects(self) -> bool:
@@ -132,6 +135,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> CuratorConfig:
             keep=int(select.get("keep") or 0),
             criteria=str(select.get("criteria") or "").strip(),
             translate=bool(raw_rule.get("translate", False)),
+            mode=str(select.get("mode") or "individual").strip().lower(),
         )
 
     return CuratorConfig(
@@ -276,6 +280,100 @@ def parse_selection(text: str, count: int, keep: int) -> list[int] | None:
     return picked
 
 
+def build_judge_prompt(title: str, criteria: str) -> str:
+    return (
+        "次の見出しが条件に当てはまるか判定してください。\n\n"
+        f"【条件】\n{criteria}\n"
+        f"【見出し】\n{title}\n\n"
+        '残すなら {"keep": true}、捨てるなら {"keep": false} と答えてください。\n'
+        "説明は書かないでください。"
+    )
+
+
+TRUE_WORDS = ("true", "yes", "はい", "残す", "1")
+FALSE_WORDS = ("false", "no", "いいえ", "捨てる", "0")
+
+
+def parse_judgement(text: str) -> bool | None:
+    """「残す/捨てる」の判定を取り出す。読めなければ None。"""
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            value = parsed.get("keep")
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return bool(value)
+            if isinstance(value, str):
+                low = value.strip().lower()
+                if low in TRUE_WORDS:
+                    return True
+                if low in FALSE_WORDS:
+                    return False
+    except (ValueError, TypeError):
+        pass
+
+    low = text.strip().lower()
+    has_true = any(w in low for w in TRUE_WORDS)
+    has_false = any(w in low for w in FALSE_WORDS)
+    if has_true and not has_false:
+        return True
+    if has_false and not has_true:
+        return False
+    return None
+
+
+def select_one_by_one(
+    client: OllamaClient,
+    items: list[dict[str, Any]],
+    rule: SectionRule,
+    deadline: float,
+    explain: list[tuple[str, str]] | None = None,
+) -> list[dict[str, Any]]:
+    """1 件ずつ「残す/捨てる」を判定する。
+
+    小さいモデルは「一覧から選べ」が苦手で、読まずに先頭から番号を返してくる。
+    二択にすると実際に見出しを読んで判断するようになる。
+    問い合わせ回数は増えるが、1 回あたりのプロンプトが短いので合計時間は変わらない。
+    """
+    kept: list[dict[str, Any]] = []
+    undecided: list[dict[str, Any]] = []
+
+    for item in items:
+        title = str(item.get("title", ""))
+        if time.monotonic() > deadline:
+            LOG.warning("時間切れ。残りは判定せずそのまま通します")
+            undecided.extend(items[items.index(item):])
+            break
+
+        try:
+            answer = client.generate(build_judge_prompt(title, rule.criteria), True, 24)
+        except CuratorError as exc:
+            LOG.warning("判定に失敗しました (%s)。この記事は残します", exc)
+            undecided.append(item)
+            if explain is not None:
+                explain.append((title, "エラー→残す"))
+            continue
+
+        verdict = parse_judgement(answer)
+        if verdict is None:
+            undecided.append(item)
+            if explain is not None:
+                explain.append((title, f"不明→残す ({answer.strip()[:20]})"))
+        elif verdict:
+            kept.append(item)
+            if explain is not None:
+                explain.append((title, "残す"))
+        elif explain is not None:
+            explain.append((title, "捨てる"))
+
+    # 判定できなかったものは捨てない。ただし採用分で足りていれば末尾に回す
+    result = kept + undecided
+    if len(result) > rule.keep:
+        result = result[: rule.keep]
+    return result
+
+
 def select_items(
     client: OllamaClient,
     items: list[dict[str, Any]],
@@ -288,7 +386,7 @@ def select_items(
         LOG.debug("元から %d 件なので選別しません", len(items))
         return items
 
-    kept: list[dict[str, Any]] = []
+    kept: list[dict[str, Any]] = []  # batch 方式
     chunks = [items[i : i + chunk_size] for i in range(0, len(items), chunk_size)]
     # 分割したぶん 1 回あたりの取り分を減らす。合計が keep を大きく超えないように
     per_chunk = max(1, -(-rule.keep // len(chunks)))
@@ -378,6 +476,7 @@ def translate_titles(
 def curate(
     sections: list[dict[str, Any]],
     config_path: str | Path = DEFAULT_CONFIG_PATH,
+    explain: dict[str, list[tuple[str, str]]] | None = None,
 ) -> list[dict[str, Any]]:
     """セクション配列を選別して返す。**決して例外を投げない。**
 
@@ -385,13 +484,17 @@ def curate(
     入力をそのまま返す。配信は今までどおり続く。
     """
     try:
-        return _curate(sections, load_config(config_path))
+        return _curate(sections, load_config(config_path), explain)
     except Exception:
         LOG.exception("選別で予期しない例外が出ました。収集したままの結果で続けます")
         return sections
 
 
-def _curate(sections: list[dict[str, Any]], config: CuratorConfig) -> list[dict[str, Any]]:
+def _curate(
+    sections: list[dict[str, Any]],
+    config: CuratorConfig,
+    explain: dict[str, list[tuple[str, str]]] | None = None,
+) -> list[dict[str, Any]]:
     if not config.rules:
         LOG.info("選別の設定がありません。そのまま通します")
         return sections
@@ -423,7 +526,13 @@ def _curate(sections: list[dict[str, Any]], config: CuratorConfig) -> list[dict[
             before = len(items)
             section_started = time.monotonic()
             if rule.selects:
-                items = select_items(client, items, rule, config.chunk_size, deadline)
+                if rule.mode == "batch":
+                    items = select_items(client, items, rule, config.chunk_size, deadline)
+                else:
+                    log = [] if explain is not None else None
+                    items = select_one_by_one(client, items, rule, deadline, log)
+                    if explain is not None and log is not None:
+                        explain[str(section.get("id"))] = log
             if rule.translate:
                 items = translate_titles(client, items, deadline)
 
@@ -447,6 +556,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--env", default=str(DEFAULT_ENV_PATH), help=".env のパス")
     parser.add_argument("--check", action="store_true", help="Ollama とモデルの疎通を確認する")
     parser.add_argument("--dry-run", action="store_true", help="LLM を呼ばず、送る内容を表示する")
+    parser.add_argument("--explain", action="store_true",
+                        help="1 件ずつの採否を表示する（判定が効いているかの確認用）")
     parser.add_argument("-v", "--verbose", action="store_true", help="debug ログまで出す")
     args = parser.parse_args(argv)
 
@@ -514,8 +625,24 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     before = {str(s.get("id")): len(s.get("items") or []) for s in sections}
-    curated = curate(sections, args.config)
-    print(json.dumps(curated, ensure_ascii=False, indent=2))
+    explain: dict[str, list[tuple[str, str]]] | None = {} if args.explain else None
+    curated = curate(sections, args.config, explain)
+
+    if explain is None:
+        print(json.dumps(curated, ensure_ascii=False, indent=2))
+    else:
+        for section_id, judgements in explain.items():
+            print(f"\n=== {section_id} ===", file=sys.stderr)
+            for title, verdict in judgements:
+                mark = "○" if verdict == "残す" else ("×" if verdict == "捨てる" else "?")
+                print(f"  {mark} [{verdict}] {title[:60]}", file=sys.stderr)
+        kept = sum(1 for j in explain.values() for _, v in j if v == "残す")
+        dropped = sum(1 for j in explain.values() for _, v in j if v == "捨てる")
+        unknown = sum(1 for j in explain.values() for _, v in j if v not in ("残す", "捨てる"))
+        print(f"\n判定: 残す {kept} / 捨てる {dropped} / 判定できず {unknown}", file=sys.stderr)
+        if dropped == 0:
+            print("[警告] 1 件も捨てていません。モデルが条件を読めていない可能性があります",
+                  file=sys.stderr)
 
     print("", file=sys.stderr)
     for section in curated:
