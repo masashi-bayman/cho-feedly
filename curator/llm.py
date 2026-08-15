@@ -730,7 +730,7 @@ def select_one_by_one(
     items: list[dict[str, Any]],
     rule: SectionRule,
     deadline: float,
-    explain: list[tuple[str, str]] | None = None,
+    explain: list[tuple[str, str, str]] | None = None,
     style: JudgeStyle | None = None,
 ) -> list[dict[str, Any]]:
     """1 件ずつ「残す/捨てる」を判定する。
@@ -758,20 +758,23 @@ def select_one_by_one(
             LOG.warning("判定に失敗しました (%s)。この記事は残します", exc)
             undecided.append(item)
             if explain is not None:
-                explain.append((title, "エラー→残す"))
+                explain.append((title, "エラー→残す", str(exc)))
             continue
 
         verdict = style.parse(answer, rule)
+        # モデルが実際に何と答えたかは残しておく。category の聞き方では
+        # これが調整の手掛かりになる（想定と違う分野を答えていないか）
+        said = " ".join(answer.split())[:24]
         if verdict is None:
             undecided.append(item)
             if explain is not None:
-                explain.append((title, f"不明→残す ({answer.strip()[:20]})"))
+                explain.append((title, "不明→残す", said))
         elif verdict:
             kept.append(item)
             if explain is not None:
-                explain.append((title, "残す"))
+                explain.append((title, "残す", said))
         elif explain is not None:
-            explain.append((title, "捨てる"))
+            explain.append((title, "捨てる", said))
 
     # 判定できなかったものは捨てない
     result = kept + undecided
@@ -791,9 +794,9 @@ def select_one_by_one(
                     len(kept), len(result))
         if explain is not None:
             # 「捨てる」と出したのに残ったものは、そう見えるようにしておく
-            for i, (title, verdict) in enumerate(explain):
+            for i, (title, verdict, said) in enumerate(explain):
                 if verdict == "捨てる" and title in restored:
-                    explain[i] = (title, "捨てる→戻した")
+                    explain[i] = (title, "捨てる→戻した", said)
 
     # 元の並び（新しい順）に戻す
     order = {id(x): i for i, x in enumerate(items)}
@@ -906,7 +909,7 @@ def translate_titles(
 def curate(
     sections: list[dict[str, Any]],
     config_path: str | Path = DEFAULT_CONFIG_PATH,
-    explain: dict[str, list[tuple[str, str]]] | None = None,
+    explain: dict[str, list[tuple[str, str, str]]] | None = None,
 ) -> list[dict[str, Any]]:
     """セクション配列を選別して返す。**決して例外を投げない。**
 
@@ -923,7 +926,7 @@ def curate(
 def _curate(
     sections: list[dict[str, Any]],
     config: CuratorConfig,
-    explain: dict[str, list[tuple[str, str]]] | None = None,
+    explain: dict[str, list[tuple[str, str, str]]] | None = None,
 ) -> list[dict[str, Any]]:
     if not config.rules:
         LOG.info("選別の設定がありません。そのまま通します")
@@ -1317,7 +1320,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     before = {str(s.get("id")): len(s.get("items") or []) for s in sections}
-    explain: dict[str, list[tuple[str, str]]] | None = {} if args.explain else None
+    explain: dict[str, list[tuple[str, str, str]]] | None = {} if args.explain else None
     curated = curate(sections, args.config, explain)
 
     if explain is None:
@@ -1326,9 +1329,10 @@ def main(argv: list[str] | None = None) -> int:
         marks = {"残す": "○", "捨てる": "×", "捨てる→戻した": "△"}
         for section_id, judgements in explain.items():
             print(f"\n=== {section_id} ===", file=sys.stderr)
-            for title, verdict in judgements:
-                print(f"  {marks.get(verdict, '?')} [{verdict}] {title[:60]}", file=sys.stderr)
-        verdicts = [v for j in explain.values() for _, v in j]
+            for title, verdict, said in judgements:
+                mark = marks.get(verdict, "?")
+                print(f"  {mark} {verdict:8} 「{said}」 {title[:48]}", file=sys.stderr)
+        verdicts = [v for j in explain.values() for _, v, _ in j]
         kept = verdicts.count("残す")
         dropped = verdicts.count("捨てる")
         restored = verdicts.count("捨てる→戻した")
