@@ -44,6 +44,30 @@ git pull
 
 サービスは oneshot なので再起動は不要。次回のタイマー起動から新しいコードが動く。
 
+**ただし `deploy/*.service` と `deploy/*.timer` を変更した場合は別。**
+動いているのは `/etc/systemd/system/` に置いた複製なので、`git pull` では
+更新されない。入れ直しが要る。
+
+```bash
+sudo cp deploy/daily-digest.service deploy/daily-digest.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+systemctl cat daily-digest.service | grep TimeoutStartSec   # 反映を確認
+```
+
+### TimeoutStartSec と total_budget の関係
+
+`daily-digest.service` の `TimeoutStartSec` は、**必ず `config/curator.yaml` の
+`total_budget` より大きくしておくこと。**
+
+選別は `total_budget` を超えると自分で切り上げ、取れた分を配信する作りになって
+いる。`TimeoutStartSec` がそれより短いと、切り上げる前に systemd がプロセスごと
+殺すので、**配信もサイト生成も行われない**。手で実行したときは制限が無いため
+気付けない。
+
+実際に `total_budget` を 900 → 1800 秒へ上げたまま `TimeoutStartSec=600` を
+放置していて、選別に 921 秒かかった朝に丸ごと落ちた。
+`journalctl` に `Start operation timed out. Terminating.` が出ていたら これ。
+
 ## 確認
 
 ```bash

@@ -13,8 +13,23 @@ ExecStart=/home/pi/cho-feedly/.venv/bin/python run_daily.py
 # 起動直後は名前解決が不安定なことがあるため少し待つ
 ExecStartPre=/bin/sleep 15
 
-# ネットワーク不調時に居座らせない
-TimeoutStartSec=600
+# 居座らせないための上限。
+#
+# ⚠ 必ず curator.yaml の total_budget より大きくすること。
+#   選別は total_budget を超えると自分で切り上げて、取れた分を配信する
+#   作りになっている。ここがそれより短いと、切り上げる前に systemd が
+#   プロセスごと殺してしまい、配信もサイト生成も行われない。
+#   実際に total_budget を 1800 に上げたままここを 600 のままにしていて、
+#   選別が 921 秒かかった朝に丸ごと落ちた。
+#
+#   内訳の目安（見出し 70 件の日）:
+#     ExecStartPre の待機      15 秒
+#     収集（RSS 16 + 市況 7）  約 180 秒
+#     選別（total_budget 上限） 最大 1800 秒
+#     和訳・生成・配信          約 120 秒
+#                              ─────────
+#                              約 2115 秒
+TimeoutStartSec=2700
 
 StandardOutput=journal
 StandardError=journal
