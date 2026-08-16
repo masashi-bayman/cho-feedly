@@ -62,12 +62,11 @@ symbols:
   # fund_cd はファンドページの URL に入っている番号です。
   #   https://emaxis.am.mufg.jp/fund/253425.html  →  253425
   #
-  # ⚠ このコードは 2026-08-16 時点で未検証です。確認してください:
-  #       python3 -m collectors.market --check
+  # 2026-08-16 に Raspberry Pi 上で疎通確認済み（39,019 +0.57%）。
+  # 返ってくる JSON のキーは nav（基準価額）と cmp_prev_day（前日比）。
   #
-  #   NG（HTTP 404）なら fund_cd が違います。協会コード 0331418A も試す価値あり。
-  #   NG（NO DATA）なら JSON のキー名が想定と違います。--check が生の JSON の
-  #   先頭を出すので、それを見て collectors/market.py の NAV_KEYS を直します。
+  # 別のファンドを足すときも source: fund と fund_cd だけで足ります。
+  # 三菱UFJ以外の投信は、この API では取れないので source: csv を使ってください。
   # ─────────────────────────────────────────────────────────────────────
   - name: オルカン
     source: fund
