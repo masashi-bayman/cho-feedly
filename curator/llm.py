@@ -590,19 +590,24 @@ def _prompt_category(title: str, rule: SectionRule) -> str:
 def _parse_category(text: str, rule: SectionRule) -> bool | None:
     """答えた分野が「読みたい方」に入っていれば残す。
 
+    一致するものが複数あったら、**長い方**を採用する。残す側を先に見る作りだと
+    「ゲーム」を残す側に、「ゲーム以外の話題」を捨てる側に置いた瞬間、
+    後者の答えが前者に一致して残ってしまう。設定の書き方で壊れるのは避ける。
+
     どちらにも無い言葉を返してきたら不明扱い。不明は捨てないので、
     分野名を思いつきで作られても記事が消えることはない。
     """
     answer = normalize_label(text)
     if not answer:
         return None
-    for label in rule.keep_categories:
-        if normalize_label(label) and normalize_label(label) in answer:
-            return True
-    for label in rule.drop_categories:
-        if normalize_label(label) and normalize_label(label) in answer:
-            return False
-    return None
+
+    best: tuple[int, bool] | None = None
+    for keep, labels in ((True, rule.keep_categories), (False, rule.drop_categories)):
+        for label in labels:
+            needle = normalize_label(label)
+            if needle and needle in answer and (best is None or len(needle) > best[0]):
+                best = (len(needle), keep)
+    return None if best is None else best[1]
 
 
 def normalize_label(text: str) -> str:
@@ -968,6 +973,13 @@ def _curate(
 
             before = len(items)
             section_started = time.monotonic()
+
+            # 和訳を選別より先に行う。読めない言語のまま判定させると、
+            # 中身に関係なく同じ分野に落ちる。実測では Hacker News の英語見出しが
+            # 軒並み「AI以外の技術」と判定されて全滅した。
+            # 落とす分まで訳す無駄は出るが、判定できない方がはるかに損。
+            if rule.translate:
+                items = translate_titles(client, items, deadline)
             if rule.selects:
                 if rule.mode == "batch":
                     items = select_items(client, items, rule, config.chunk_size, deadline)
@@ -976,8 +988,6 @@ def _curate(
                     items = select_one_by_one(client, items, rule, deadline, log, style)
                     if explain is not None and log is not None:
                         explain[str(section.get("id"))] = log
-            if rule.translate:
-                items = translate_titles(client, items, deadline)
 
             section["items"] = items
             LOG.info("[%s] %d 件 → %d 件 (%.0f 秒)",
@@ -1332,6 +1342,19 @@ def main(argv: list[str] | None = None) -> int:
             for title, verdict, said in judgements:
                 mark = marks.get(verdict, "?")
                 print(f"  {mark} {verdict:8} 「{said}」 {title[:48]}", file=sys.stderr)
+
+            # 欄ごとに「判定で残したもの」と「安全弁が戻したもの」を分けて出す。
+            # 合計だけ見ていると、判定が何もしていない欄を見落とす
+            section_verdicts = [v for _, v, _ in judgements]
+            picked = section_verdicts.count("残す")
+            restored_here = section_verdicts.count("捨てる→戻した")
+            print(f"  → 判定で残した {picked} 件 / 安全弁で戻した {restored_here} 件",
+                  file=sys.stderr)
+            if picked == 0 and judgements:
+                print("    [警告] この欄は判定が 1 件も残していません。"
+                      "並んでいるのは新しい順に戻しただけのもので、選別は効いていません",
+                      file=sys.stderr)
+
         verdicts = [v for j in explain.values() for _, v, _ in j]
         kept = verdicts.count("残す")
         dropped = verdicts.count("捨てる")
