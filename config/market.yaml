@@ -53,24 +53,25 @@ symbols:
     decimals: 0
 
   # ─────────────────────────────────────────────────────────────────────
-  # ⚠ url が空のままだと読み飛ばされます（警告は出ますが他の銘柄は動きます）。
+  # 国内の投資信託は Yahoo Finance からは取れないので、運用会社が公開している
+  # API を直接読みます。オルカン（eMAXIS Slim 全世界株式）の運用会社は
+  # 三菱UFJアセットマネジメントで、登録不要の投信情報 API を出しています。
   #
-  #   国内の投資信託は Yahoo Finance からは取れないので、運用会社が公開している
-  #   基準価額の CSV を直接読みます。オルカン（eMAXIS Slim 全世界株式）なら
-  #   運用会社は三菱UFJアセットマネジメント。ファンドのページにある
-  #   「基準価額データ」「CSVダウンロード」のようなリンクの URL を貼ってください。
+  #   https://developer.am.mufg.jp/fund_information_latest/fund_cd/253425
   #
-  #   入れたら確認:
+  # fund_cd はファンドページの URL に入っている番号です。
+  #   https://emaxis.am.mufg.jp/fund/253425.html  →  253425
+  #
+  # ⚠ このコードは 2026-08-16 時点で未検証です。確認してください:
   #       python3 -m collectors.market --check
   #
-  #   列名が違って NG になったら value_column を実際のヘッダに合わせてください。
-  #   文字コードは自動判定します（Shift_JIS / BOM 付き UTF-8 の両方に対応）。
+  #   NG（HTTP 404）なら fund_cd が違います。協会コード 0331418A も試す価値あり。
+  #   NG（NO DATA）なら JSON のキー名が想定と違います。--check が生の JSON の
+  #   先頭を出すので、それを見て collectors/market.py の NAV_KEYS を直します。
   # ─────────────────────────────────────────────────────────────────────
   - name: オルカン
-    source: csv
-    url: ""
-    value_column: 基準価額     # ヘッダにこの語を含む列を探す
-    encoding: auto            # auto / cp932 / utf-8 など
+    source: fund
+    fund_cd: "253425"
     decimals: 0
 
   # 2026-08-14 に無効化。日経平均とほぼ同じ方向に動くため、朝の一覧で

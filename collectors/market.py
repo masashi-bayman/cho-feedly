@@ -52,6 +52,12 @@ DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "market.yaml"
 # 認証は不要だが、User-Agent を付けないと弾かれることがある
 CHART_ENDPOINT = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 
+# 三菱UFJアセットマネジメントが公開している投信情報 API。
+# 登録も認証キーも不要で JSON が返る。国内の投資信託は Yahoo Finance では
+# 取れないので、運用会社が出しているこれを使う。
+# fund_cd はファンドページの URL に入っている番号（例: /fund/253425.html → 253425）
+FUND_ENDPOINT = "https://developer.am.mufg.jp/fund_information_latest/fund_cd/{fund_cd}"
+
 FALLBACK_DEFAULTS: dict[str, Any] = {
     "timeout": 15,
     "host_delay": 1.0,
@@ -83,7 +89,8 @@ class SymbolConfig:
 
     source が取得方法を決める:
       yahoo : Yahoo Finance の公開 JSON。symbol に記号を書く（指数・為替・株式）
-      csv   : 運用会社が公開している基準価額 CSV。url に場所を書く（国内の投資信託）
+      fund  : 三菱UFJの投信情報 API。fund_cd を書く（同社の投資信託）
+      csv   : 運用会社が公開している基準価額 CSV。url に場所を書く（その他の投資信託）
     """
 
     name: str
@@ -93,24 +100,29 @@ class SymbolConfig:
     symbol: str = ""
     range: str = "5d"
     url: str = ""
+    fund_cd: str = ""
     encoding: str = "auto"
     value_column: str = "基準価額"
 
     @property
     def slug(self) -> str:
-        key = self.symbol if self.source == "yahoo" else self.name
+        key = self.symbol if self.source == "yahoo" else (self.fund_cd or self.name)
         return SLUG_RE.sub("_", key).strip("_") or "unnamed"
 
     @property
     def fixture_name(self) -> str:
         """--fixtures / --save-fixtures で使うファイル名。設定から一意に決まる。"""
-        suffix = "json" if self.source == "yahoo" else "csv"
+        suffix = "csv" if self.source == "csv" else "json"
         return f"market__{self.slug}.{suffix}"
 
     @property
     def location(self) -> str:
         """ログや --check の表に出す、取得元を表す文字列。"""
-        return self.symbol if self.source == "yahoo" else (self.url or "(url 未設定)")
+        if self.source == "yahoo":
+            return self.symbol
+        if self.source == "fund":
+            return f"fund_cd={self.fund_cd}"
+        return self.url or "(url 未設定)"
 
 
 @dataclass
@@ -177,12 +189,20 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> MarketConfig:
         source = str(raw_symbol.get("source") or "yahoo").strip().lower()
         ticker = str(raw_symbol.get("symbol") or "").strip()
         url = str(raw_symbol.get("url") or "").strip()
+        fund_cd = str(raw_symbol.get("fund_cd") or "").strip()
 
-        if source not in ("yahoo", "csv"):
+        if source not in ("yahoo", "fund", "csv"):
             LOG.warning("symbols[%d] (%s) の source %r は不明です。読み飛ばします", index, name or "?", source)
             continue
         if source == "yahoo" and not ticker:
             LOG.warning("symbols[%d] (%s) に symbol がありません。読み飛ばします", index, name or "?")
+            continue
+        if source == "fund" and not fund_cd:
+            LOG.warning(
+                "%s は source: fund ですが fund_cd が未設定です。読み飛ばします "
+                "（ファンドページの URL に入っている番号です）",
+                name or f"symbols[{index}]",
+            )
             continue
         if source == "csv" and not url:
             LOG.warning(
@@ -192,7 +212,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> MarketConfig:
             )
             continue
         if not name:
-            name = ticker or url
+            name = ticker or fund_cd or url
 
         if raw_symbol.get("enabled", True) is False:
             LOG.info("%s は enabled: false のため対象外です", name)
@@ -204,6 +224,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> MarketConfig:
                 source=source,
                 symbol=ticker,
                 url=url,
+                fund_cd=fund_cd,
                 encoding=str(raw_symbol.get("encoding", "auto")),
                 value_column=str(raw_symbol.get("value_column", "基準価額")),
                 decimals=int(_as_number(raw_symbol.get("decimals", default_decimals), default_decimals, f"{name}.decimals", minimum=0)),
@@ -251,6 +272,8 @@ class NetworkSource:
     def fetch(self, symbol: SymbolConfig) -> bytes:
         if symbol.source == "csv":
             url, params = symbol.url, None
+        elif symbol.source == "fund":
+            url, params = FUND_ENDPOINT.format(fund_cd=quote(symbol.fund_cd, safe="")), None
         else:
             # ^N225 や USDJPY=X の記号をそのまま URL に置くと壊れる環境があるので符号化する
             url = CHART_ENDPOINT.format(symbol=quote(symbol.symbol, safe=""))
@@ -356,6 +379,82 @@ CSV_ENCODINGS = ("utf-8-sig", "cp932", "utf-8", "euc_jp")
 
 # CSV 内で日付を表す列。ヘッダにこの語が含まれる列を探す
 DATE_COLUMN_HINTS = ("年月日", "日付", "基準日", "date")
+
+
+# 投信情報 API のレスポンスから基準価額を取り出す。
+#
+# 手元から developer.am.mufg.jp に出られなかったため、実際の JSON を見ずに
+# 書いている。入れ子の深さや配列かどうかが違っても読めるよう、キー名で
+# 探す作りにしてある。読めなければ --check が生の JSON の先頭を出すので、
+# そこを見て NAV_KEYS / PREV_KEYS を実物に合わせること。
+NAV_KEYS = ("nav", "基準価額", "standard_price", "base_price")
+PREV_KEYS = ("cmp_prev_day", "前日比", "change", "diff")
+
+
+def _to_number(value: Any) -> float | None:
+    """API の数値を float にする。"12,345" や "+221" のような文字列も通す。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+    cleaned = unicodedata.normalize("NFKC", value).replace(",", "").replace("円", "").strip()
+    if cleaned.startswith("+"):
+        cleaned = cleaned[1:]
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def _find_number(payload: Any, keys: tuple[str, ...]) -> float | None:
+    """入れ子のどこかにある keys のいずれかを探して数値で返す。
+
+    配列で包まれていても、1 段深くても拾えるようにしておく。
+    同じキーが複数あったら最初に見つかったものを使う。
+    """
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if str(key).strip().lower() in keys:
+                number = _to_number(value)
+                if number is not None:
+                    return number
+        for value in payload.values():
+            found = _find_number(value, keys)
+            if found is not None:
+                return found
+    elif isinstance(payload, list):
+        for value in payload:
+            found = _find_number(value, keys)
+            if found is not None:
+                return found
+    return None
+
+
+def parse_fund_api(raw: bytes, symbol: SymbolConfig) -> tuple[float, float]:
+    """(基準価額, 前日の基準価額) を返す。
+
+    API は前日比を持っているので、前日の値は引き算で出す。
+    CSV のように 2 日分を並べて読む必要がない。
+    """
+    try:
+        payload = json.loads(raw.decode("utf-8", "replace"))
+    except (ValueError, TypeError) as exc:
+        raise QuoteError("JSON として読めません") from exc
+
+    nav = _find_number(payload, NAV_KEYS)
+    if nav is None:
+        raise QuoteError(
+            f"基準価額が見つかりません（探したキー: {', '.join(NAV_KEYS)}）"
+        )
+
+    change = _find_number(payload, PREV_KEYS)
+    if change is None:
+        # 前日比が無くても現在値だけは出す。前日比は「±0」表示になる
+        LOG.warning("%s: 前日比が見つかりません。前日比なしで表示します", symbol.name)
+        return nav, nav
+    return nav, nav - change
 
 
 def decode_csv(raw: bytes, encoding: str) -> str:
@@ -479,6 +578,8 @@ def collect_symbol(symbol: SymbolConfig, source: NetworkSource | FixtureSource) 
     try:
         if symbol.source == "csv":
             current, previous = parse_fund_csv(raw, symbol)
+        elif symbol.source == "fund":
+            current, previous = parse_fund_api(raw, symbol)
         else:
             current, previous = parse_quote(raw, symbol)
     except QuoteError as exc:
@@ -598,6 +699,11 @@ def print_check_table(results: list[QuoteResult]) -> None:
         print(f"[NG] {len(failed)} 件の銘柄が失敗しました:", file=sys.stderr)
         for r in failed:
             print(f"        {r.symbol.name} ({r.symbol.location}): {r.status} {r.note}".rstrip(), file=sys.stderr)
+            # 取れてはいるが読めなかった場合は中身を見せる。
+            # 想定と違うキー名で返ってきたとき、これが無いと直しようがない
+            if r.raw and r.status in ("NO DATA", "PARSE NG"):
+                head = r.raw[:300].decode("utf-8", "replace").replace("\n", " ")
+                print(f"          受け取った中身: {head}", file=sys.stderr)
         print("     記号が違う場合は config/market.yaml の symbol を直してください。", file=sys.stderr)
     else:
         print(f"[OK] {len(results)} 件すべて取得できました", file=sys.stderr)
